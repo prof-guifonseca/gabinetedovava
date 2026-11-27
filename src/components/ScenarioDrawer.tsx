@@ -1,4 +1,4 @@
-import { Award, CheckCircle2, X } from "lucide-react";
+import { Award, CheckCircle2, ExternalLink, X } from "lucide-react";
 import type { ScenarioId } from "../shared/gameState";
 import { SCENARIO_LIST } from "../shared/scenarios";
 import type { SavedAchievement } from "../hooks/useCabinetGame";
@@ -97,6 +97,31 @@ export function ScenarioDrawer({
             </div>
           </div>
         )}
+
+        <div className="trinca-bar">
+          <span className="trinca-label">TRINCA CAÓTICA DO ANEXO IV</span>
+          <div className="trinca-links">
+            <span className="trinca-pill is-current">
+              Gab. 412 · Dr. Vavá (Você está aqui)
+            </span>
+            <a
+              href="https://gabinetedobento.pages.dev"
+              target="_blank"
+              rel="noreferrer"
+              className="trinca-pill"
+            >
+              Gab. 717 · Prof. Bento (Minoria) <ExternalLink size={11} />
+            </a>
+            <a
+              href="https://gabinetedaclarice.pages.dev"
+              target="_blank"
+              rel="noreferrer"
+              className="trinca-pill"
+            >
+              Gab. 222 · Dep. Clarice (Costumes) <ExternalLink size={11} />
+            </a>
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Copy, Download, FileText, RotateCcw, X } from "lucide-react";
+import { Copy, Download, ExternalLink, FileText, RotateCcw, X } from "lucide-react";
 import {
   classifyVisitorArchetype,
   type CabinetDocument,
@@ -186,6 +186,28 @@ export function SessionSummaryModal({
             <RotateCcw size={16} />
             Nova Audiência
           </button>
+        </div>
+
+        <div className="trinca-bar">
+          <span className="trinca-label">VISITE OS VIZINHOS DA TRINCA CAÓTICA</span>
+          <div className="trinca-links">
+            <a
+              href="https://gabinetedobento.pages.dev"
+              target="_blank"
+              rel="noreferrer"
+              className="trinca-pill"
+            >
+              Gab. 717 · Prof. Bento <ExternalLink size={11} />
+            </a>
+            <a
+              href="https://gabinetedaclarice.pages.dev"
+              target="_blank"
+              rel="noreferrer"
+              className="trinca-pill"
+            >
+              Gab. 222 · Dep. Clarice <ExternalLink size={11} />
+            </a>
+          </div>
         </div>
       </div>
     </div>

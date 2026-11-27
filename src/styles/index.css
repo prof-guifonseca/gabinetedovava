@@ -399,7 +399,7 @@ input {
 /* Main Cabinet Layout */
 .cabinet-layout {
   display: grid;
-  grid-template-columns: 372px minmax(0, 1fr);
+  grid-template-columns: 356px minmax(0, 1fr);
   gap: 18px;
   flex: 1;
   align-items: stretch;
@@ -822,9 +822,9 @@ input {
   position: relative;
   display: flex;
   flex-direction: column;
-  min-height: 480px;
-  height: calc(100dvh - 172px);
-  max-height: 720px;
+  min-height: 460px;
+  height: calc(100dvh - 178px);
+  max-height: 690px;
 }
 
 .chat-toast {
@@ -1753,6 +1753,55 @@ input {
   flex-wrap: wrap;
 }
 
+/* Trinca Caótica Cross-Links */
+.trinca-bar {
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.trinca-label {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.trinca-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.trinca-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(217, 174, 76, 0.34);
+  background: rgba(16, 12, 9, 0.82);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  text-decoration: none;
+  transition: border-color 140ms ease, color 140ms ease;
+}
+
+.trinca-pill:hover {
+  border-color: var(--gold-bright);
+  color: var(--gold-bright);
+}
+
+.trinca-pill.is-current {
+  border-color: rgba(38, 168, 116, 0.52);
+  background: rgba(13, 59, 46, 0.45);
+  color: #8cf0c8;
+}
+
 /* Animations */
 @keyframes pulse-dot {
   0%, 100% {
@@ -2182,5 +2231,21 @@ input {
 
   .summary-actions .is-full-mobile {
     grid-column: 1 / -1;
+  }
+
+  .trinca-links {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+
+  .trinca-links::-webkit-scrollbar {
+    display: none;
+  }
+
+  .trinca-pill {
+    white-space: nowrap;
+    flex-shrink: 0;
   }
 }
