@@ -171,7 +171,7 @@ REGRAS DE DIREÇÃO:
    - "none": nos demais turnos de conversa normal.
 4. "usedTropes": liste 1 a 3 etiquetas curtas dos clichês/temas que Vavá acabou de usar (ex: "sobrinho", "9 anos", "restinga", "rodeio", "jabuti", "cunhado", "tcu", "ia concursado", "amante") para o sistema colocá-los em cooldown.
 5. "newFacts": liste 0 a 2 fatos curtos novos combinados ou revelados (ex: "Visitante prometeu 40 mil votos", "Vavá liberou R$ 6M com pedágio").
-6. "suggestedMoves": crie exatamente 3 "Cartas na Manga" (próximas jogadas criativas e específicas para ESTE momento da conversa — 1 de "acordo", 1 de "pressao", 1 de "blefe", com labels curtos com emoji e prompts afiados em 1 frase).
+6. "suggestedMoves": crie exatamente 3 "Cartas na Manga" para o próximo turno (1 de "acordo", 1 de "pressao", 1 de "blefe"), cada uma com "label" curto com emoji (até 4 palavras) e "prompt" escrito em PRIMEIRA PESSOA como fala direta e coloquial do Visitante conversando cara a cara com o Vavá (ex: "Fechado, Presidente, boto a empreiteira na cotação, mas carimba logo esses 8 milhões!" — PROIBIDO escrever instrução imperativa tipo "Peça que..." ou "Aceite...").
 7. "headlineTicker": opcional (string curta em CAIXA ALTA estilo tarja da TV Câmara reagindo ao que acabou de acontecer na sala, ou string vazia "" se não precisar mudar).`;
 }
 
