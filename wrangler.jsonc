@@ -1,0 +1,27 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "gabinetedovava",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-11-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "vars": {
+    "GPT_LIVE_MODEL": "gpt-live-1.1",
+    "OPENAI_TEXT_MODEL": "gpt-6-luna",
+    "DEFAULT_VOICE": "voice_6b09d70a3c608191adc4ff0de2afbeec"
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.1
+    }
+  }
+}
