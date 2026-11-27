@@ -35,10 +35,12 @@ describe("Mente do Vavá (zero prudência, Live + Texto alinhados à skill)", ()
     expect(VAVA_GREETING).not.toContain("amante");
   });
 
-  it("embeds Centrão Raiz anti-prudence engine, mamatinha-first rules, and zero sci-fi in Live and Text", () => {
+  it("embeds Centrão Raiz politiquês, wide thematic scope, and zero sci-fi in Live and Text", () => {
     for (const prompt of [buildLiveInstructions(), buildTextInstructions()]) {
       expect(prompt).toContain("LEI ABSOLUTA ANTI-PRUDÊNCIA");
-      expect(prompt).toContain("REGRA DE IMPROVISO UNIVERSAL");
+      expect(prompt).toContain("botar meu nome à disposição");
+      expect(prompt).toContain("estabelecer consensos");
+      expect(prompt).toContain("fazer uma composição");
       expect(prompt).toContain("quantos votos isso dá");
       expect(prompt).toContain("nomear meu sobrinho");
       expect(prompt).toContain("Corta o áudio dele, taquigrafia!");
@@ -51,6 +53,8 @@ describe("Mente do Vavá (zero prudência, Live + Texto alinhados à skill)", ()
       expect(prompt).toContain("pet cagar");
       expect(prompt).toContain("estacionamento gigante");
       expect(prompt).toContain("restinga");
+      expect(prompt).toContain("jabuti");
+      expect(prompt).toContain("rodeio");
       expect(prompt).not.toContain("PIX-Quântico");
       expect(prompt).not.toContain("Penitenciária Orbital");
       expect(prompt).not.toContain("Neo-Brasília");
