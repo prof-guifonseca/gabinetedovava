@@ -7,9 +7,9 @@ import {
 } from "../shared/gameState";
 import { SCENARIOS } from "../shared/scenarios";
 import {
-  copyImageOrDownload,
   downloadBlob,
   generateDossierCard,
+  shareImageNativeOrCopy,
 } from "../utils/shareCardGenerator";
 
 interface SessionSummaryModalProps {
@@ -44,9 +44,18 @@ export function SessionSummaryModal({
         downloadBlob(blob, filename);
         setStatusMsg("Ata PNG salva!");
       } else {
-        const res = await copyImageOrDownload(blob, filename);
+        const res = await shareImageNativeOrCopy(
+          blob,
+          filename,
+          `Ata do Gabinete do Vavá — ${arch.title}`,
+          `Saí do Gabinete 412 como "${arch.title}"! Testa lá: https://gabinetedovava.pages.dev`
+        );
         setStatusMsg(
-          res === "copied" ? "Card copiado! Cole no WhatsApp." : "Ata PNG salva!"
+          res === "shared"
+            ? "Ata compartilhada!"
+            : res === "copied"
+            ? "Card copiado! Cole no WhatsApp."
+            : "Ata PNG salva!"
         );
       }
       window.setTimeout(() => setStatusMsg(null), 2600);

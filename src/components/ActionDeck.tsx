@@ -1,6 +1,7 @@
 import { ChevronDown, ChevronUp, Sparkles } from "lucide-react";
 import { useState } from "react";
 import type { SuggestedMove } from "../shared/gameState";
+import { cabinetSfx } from "../audio/cabinetSfx";
 
 interface ActionDeckProps {
   moves: SuggestedMove[];
@@ -46,7 +47,10 @@ export function ActionDeck({ moves, disabled, onPickMove }: ActionDeckProps) {
               type="button"
               className={`tactic-chip is-${move.tone}`}
               disabled={disabled}
-              onClick={() => onPickMove(move.prompt)}
+              onClick={() => {
+                cabinetSfx.playPaperTap();
+                onPickMove(move.prompt);
+              }}
               title={move.prompt}
             >
               {move.label}

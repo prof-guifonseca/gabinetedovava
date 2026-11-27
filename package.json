@@ -10,7 +10,9 @@
     "cf-typegen": "wrangler types",
     "check": "tsc --noEmit",
     "test": "vitest run",
-    "deploy": "vite build && wrangler deploy"
+    "build:pages": "vite build && node scripts/prepare-pages.mjs",
+    "deploy": "vite build && node scripts/prepare-pages.mjs && wrangler pages deploy dist/pages --project-name=gabinetedovava --branch=main",
+    "deploy:worker": "vite build && wrangler deploy"
   },
   "dependencies": {
     "hono": "^4.7.10",

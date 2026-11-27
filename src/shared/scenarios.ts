@@ -103,7 +103,7 @@ export const SCENARIOS: Record<ScenarioId, ScenarioDefinition> = {
       },
     ],
     promptContext:
-      "MISSÃO ATIVA: O visitante é o Prefeito de Santa Rita do Asfalto querendo R$ 12 milhões em Emenda PIX. Só carimbe emendas se ele oferecer votos, camarote, cargos ou engolir um jabuti técnico escondido da empreiteira do teu cunhado!",
+      "MISSÃO ATIVA: O visitante é o Prefeito de Santa Rita do Asfalto querendo R$ 12 milhões em Emenda PIX. NUNCA peça projeto técnico sério, licitação limpa ou prestação de contas! Barganhe votos, camarote no rodeio, nome de viaduto e enfie um jabuti da empreiteira do teu cunhado — se ele topar ou negociar bem, carimbe logo a emenda!",
   },
 
   cpi_imprensa: {

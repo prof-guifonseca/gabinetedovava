@@ -2,6 +2,7 @@ import { Award, CheckCircle2, X } from "lucide-react";
 import type { ScenarioId } from "../shared/gameState";
 import { SCENARIO_LIST } from "../shared/scenarios";
 import type { SavedAchievement } from "../hooks/useCabinetGame";
+import { cabinetSfx } from "../audio/cabinetSfx";
 
 interface ScenarioDrawerProps {
   open: boolean;
@@ -60,6 +61,7 @@ export function ScenarioDrawer({
                 type="button"
                 className={`scenario-card ${isActive ? "is-active" : ""}`}
                 onClick={() => {
+                  cabinetSfx.playPaperTap();
                   onSelectScenario(sc.id);
                   onClose();
                 }}

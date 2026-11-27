@@ -4,8 +4,8 @@ import type { ChatEntry } from "../hooks/useGptLiveSession";
 import type { AvatarMood, SuggestedMove } from "../shared/gameState";
 import { ActionDeck } from "./ActionDeck";
 import {
-  copyImageOrDownload,
   generateQuoteCard,
+  shareImageNativeOrCopy,
 } from "../utils/shareCardGenerator";
 
 interface TaquigrafiaPanelProps {
@@ -32,7 +32,7 @@ export function TaquigrafiaPanel({
   onToggleVoiceCall,
 }: TaquigrafiaPanelProps) {
   const [draft, setDraft] = useState("");
-  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [copiedMeta, setCopiedMeta] = useState<{ id: string; label: string } | null>(null);
   const feedRef = useRef<HTMLDivElement | null>(null);
 
   const isInputBlocked = isSendingText || micCutSecondsLeft > 0;
@@ -58,11 +58,22 @@ export function TaquigrafiaPanel({
         mood: (entry.mood as AvatarMood) || "falando",
         badge: scenarioBadge,
       });
-      await copyImageOrDownload(blob, `aspas-vava-${entry.id}.png`);
-      setCopiedId(entry.id);
+      const result = await shareImageNativeOrCopy(
+        blob,
+        `aspas-vava-${entry.id}.png`,
+        "Aspas da TV Câmara — Gabinete do Vavá",
+        `"${entry.text}" — Dep. Dr. Vavá Braga (https://gabinetedovava.pages.dev)`
+      );
+      const label =
+        result === "shared"
+          ? "Enviado!"
+          : result === "copied"
+          ? "Copiado!"
+          : "PNG salvo!";
+      setCopiedMeta({ id: entry.id, label });
       window.setTimeout(() => {
-        setCopiedId((curr) => (curr === entry.id ? null : curr));
-      }, 2200);
+        setCopiedMeta((curr) => (curr?.id === entry.id ? null : curr));
+      }, 2400);
     } catch {
       // ignore canvas errors
     }
@@ -99,13 +110,13 @@ export function TaquigrafiaPanel({
                   {canShare && (
                     <button
                       type="button"
-                      className={`quote-share-btn ${copiedId === entry.id ? "is-done" : ""}`}
+                      className={`quote-share-btn ${copiedMeta?.id === entry.id ? "is-done" : ""}`}
                       onClick={() => void handleShareQuote(entry)}
                       title="Gerar card PNG 'Aspas da TV Câmara' para WhatsApp"
                     >
-                      {copiedId === entry.id ? (
+                      {copiedMeta?.id === entry.id ? (
                         <>
-                          <Check size={11} /> Copiado!
+                          <Check size={11} /> {copiedMeta.label}
                         </>
                       ) : (
                         <>

@@ -2,9 +2,9 @@ import { useState } from "react";
 import { Copy, Download, MessageSquareWarning, X } from "lucide-react";
 import type { CabinetDocument } from "../shared/gameState";
 import {
-  copyImageOrDownload,
   downloadBlob,
   generateDocumentCard,
+  shareImageNativeOrCopy,
 } from "../utils/shareCardGenerator";
 
 interface DocumentOverlayProps {
@@ -32,9 +32,18 @@ export function DocumentOverlay({
         downloadBlob(blob, filename);
         setShareFeedback("PNG salvo!");
       } else {
-        const result = await copyImageOrDownload(blob, filename);
+        const result = await shareImageNativeOrCopy(
+          blob,
+          filename,
+          "Documento do Gabinete do Vavá",
+          "Olha o documento que o Dr. Vavá carimbou no Gabinete 412: https://gabinetedovava.pages.dev"
+        );
         setShareFeedback(
-          result === "copied" ? "Imagem copiada! Cole no WhatsApp." : "PNG salvo!"
+          result === "shared"
+            ? "Compartilhado!"
+            : result === "copied"
+            ? "Imagem copiada! Cole no WhatsApp."
+            : "PNG salvo!"
         );
       }
       window.setTimeout(() => setShareFeedback(null), 2600);

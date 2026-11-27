@@ -89,11 +89,22 @@ function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
   });
 }
 
+async function ensureFontsReady(): Promise<void> {
+  try {
+    if (typeof document !== "undefined" && document.fonts?.ready) {
+      await document.fonts.ready;
+    }
+  } catch {
+    // proceed with fallback fonts
+  }
+}
+
 export async function generateQuoteCard(params: {
   quote: string;
   mood: AvatarMood;
   badge?: string;
 }): Promise<Blob> {
+  await ensureFontsReady();
   const canvas = document.createElement("canvas");
   canvas.width = 1080;
   canvas.height = 1080;
@@ -192,6 +203,7 @@ export async function generateQuoteCard(params: {
 }
 
 export async function generateDocumentCard(doc: CabinetDocument): Promise<Blob> {
+  await ensureFontsReady();
   const canvas = document.createElement("canvas");
   canvas.width = 1080;
   canvas.height = 1080;
@@ -348,6 +360,7 @@ export async function generateDocumentCard(doc: CabinetDocument): Promise<Blob> 
 }
 
 export async function generateDossierCard(ledger: SessionLedger): Promise<Blob> {
+  await ensureFontsReady();
   const canvas = document.createElement("canvas");
   canvas.width = 1080;
   canvas.height = 1080;
@@ -491,4 +504,33 @@ export async function copyImageOrDownload(
   }
   downloadBlob(blob, filename);
   return "downloaded";
+}
+
+export async function shareImageNativeOrCopy(
+  blob: Blob,
+  filename: string,
+  title = "Gabinete do Vavá",
+  text = "Olha o que o Dr. Vavá aprontou no Gabinete 412: https://gabinetedovava.pages.dev"
+): Promise<"shared" | "copied" | "downloaded"> {
+  try {
+    if (
+      typeof navigator !== "undefined" &&
+      typeof File !== "undefined" &&
+      typeof navigator.share === "function"
+    ) {
+      const file = new File([blob], filename, { type: "image/png" });
+      if (
+        typeof navigator.canShare === "function" &&
+        navigator.canShare({ files: [file] })
+      ) {
+        await navigator.share({ files: [file], title, text });
+        return "shared";
+      }
+    }
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      return "shared";
+    }
+  }
+  return copyImageOrDownload(blob, filename);
 }
