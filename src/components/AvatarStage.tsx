@@ -94,172 +94,186 @@ export function AvatarStage({
       className={`panel-card avatar-stage ${isGavelShaking ? "is-gavel-shaking" : ""}`}
       aria-label="Dep. Vavá Braga"
     >
-      <div
-        className={`avatar-viewport ${isSpeaking ? "is-speaking" : ""}`}
-        data-mood={activeMood}
-        style={viewportStyle}
-      >
-        {(Object.keys(AVATAR_SOURCES) as AvatarMood[]).map((key) => (
-          <img
-            key={key}
-            src={AVATAR_SOURCES[key]}
-            alt='Dep. Dr. Valdemar "Vavá" Braga'
-            className={`avatar-img ${activeMood === key ? "is-active" : ""}`}
-          />
-        ))}
+      <div className="stage-shell">
+        <div
+          className={`avatar-viewport ${isSpeaking ? "is-speaking" : ""}`}
+          data-mood={activeMood}
+          style={viewportStyle}
+        >
+          {(Object.keys(AVATAR_SOURCES) as AvatarMood[]).map((key) => (
+            <img
+              key={key}
+              src={AVATAR_SOURCES[key]}
+              alt='Dep. Dr. Valdemar "Vavá" Braga'
+              className={`avatar-img ${activeMood === key ? "is-active" : ""}`}
+            />
+          ))}
 
-        <div className="avatar-vignette" />
-        <div className="avatar-halo" />
+          <div className="avatar-vignette" />
+          <div className="avatar-halo" />
 
-        {/* GC / Tarja TV Câmara */}
-        <div className="tv-camara-bug">
-          <span className={`tv-dot ${status === "live" ? "is-live" : ""}`} />
-          <span>
-            {status === "live"
-              ? isStandby
-                ? "EM ESPERA · GAB. 412"
-                : "AO VIVO · TV CÂMARA"
-              : "GABINETE 412 · ANEXO IV"}
-          </span>
-          <span className="tv-mood-pill">{MOOD_LABELS[activeMood]}</span>
-        </div>
+          {/* GC / Tarja TV Câmara */}
+          <div className="tv-camara-bug">
+            <span className={`tv-dot ${status === "live" ? "is-live" : ""}`} />
+            <span>
+              {status === "live"
+                ? isStandby
+                  ? "EM ESPERA · GAB. 412"
+                  : "AO VIVO · TV CÂMARA"
+                : "GABINETE 412 · ANEXO IV"}
+            </span>
+            <span className="tv-mood-pill">{MOOD_LABELS[activeMood]}</span>
+          </div>
 
-        {/* Alerta de Interrupção de Bastidor (Dona Neide / TCU / Plenário) */}
-        {activeInterrupt && (
-          <div className="interrupt-ribbon" role="status">
-            <Radio size={13} />
-            <div>
-              <strong>{activeInterrupt.badge}</strong>
-              <span>{activeInterrupt.headline}</span>
+          {/* Alerta de Interrupção de Bastidor (Dona Neide / TCU / Plenário) */}
+          {activeInterrupt && (
+            <div className="interrupt-ribbon" role="status">
+              <Radio size={13} />
+              <div>
+                <strong>{activeInterrupt.badge}</strong>
+                <span>{activeInterrupt.headline}</span>
+              </div>
             </div>
-          </div>
-        )}
-
-        {/* Selo de Áudio Cortado pela Taquigrafia */}
-        {micCutSecondsLeft > 0 && (
-          <div className="mic-cut-overlay" role="alert">
-            <ShieldOff size={22} />
-            <strong>ÁUDIO CORTADO PELA TAQUIGRAFIA</strong>
-            <span>Restabelecendo em {micCutSecondsLeft}s...</span>
-          </div>
-        )}
-
-        <div className="avatar-caption">
-          <div>
-            <p className="avatar-name">Dr. Valdemar &ldquo;Vavá&rdquo; Braga</p>
-            <p className="avatar-role">Presidente da Câmara · PMD/DF</p>
-          </div>
-          <div className="eq-bars" aria-hidden="true">
-            {eqHeights.map((h, idx) => (
-              <span
-                key={idx}
-                className="eq-bar"
-                style={{
-                  height: `${h}px`,
-                  background:
-                    activeMood === "crise"
-                      ? "var(--danger)"
-                      : activeMood === "acordo" || activeMood === "sussurro"
-                      ? "var(--gold)"
-                      : activeMood === "telefone"
-                      ? "var(--amber)"
-                      : "var(--emerald)",
-                }}
-              />
-            ))}
-          </div>
-        </div>
-      </div>
-
-      <div className="stage-controls">
-        <div className="primary-cta-row">
-          {status !== "live" ? (
-            <button
-              type="button"
-              className="btn-voice"
-              disabled={status === "connecting"}
-              onClick={onStartLive}
-            >
-              <Mic size={18} />
-              {status === "connecting"
-                ? "Entrando no gabinete..."
-                : "Falar ao vivo com o Vavá"}
-            </button>
-          ) : (
-            <>
-              <button
-                type="button"
-                className={`btn-secondary ${isMuted ? "is-muted" : ""}`}
-                disabled={isForceMuted}
-                onClick={onToggleMute}
-                aria-label={isMuted ? "Ativar microfone" : "Silenciar microfone"}
-              >
-                {isMuted ? <MicOff size={17} /> : <Mic size={17} />}
-                {isForceMuted ? "Cortado" : isMuted ? "Mutado" : "Mic"}
-              </button>
-              <button
-                type="button"
-                className="btn-voice is-danger"
-                onClick={onStopLive}
-              >
-                <PhoneOff size={17} />
-                Encerrar voz
-              </button>
-            </>
           )}
-        </div>
 
-        {status === "live" && (
-          <div className="live-footer-meta">
-            <div className="mic-meter-row">
-              <span>{isForceMuted ? "CORTE" : isMuted ? "MUDO" : "MIC"}</span>
-              <div className="mic-meter-track">
-                <div
-                  className="mic-meter-fill"
+          {/* Selo de Áudio Cortado pela Taquigrafia */}
+          {micCutSecondsLeft > 0 && (
+            <div className="mic-cut-overlay" role="alert">
+              <ShieldOff size={22} />
+              <strong>ÁUDIO CORTADO PELA TAQUIGRAFIA</strong>
+              <span>Restabelecendo em {micCutSecondsLeft}s...</span>
+            </div>
+          )}
+
+          <div className="avatar-caption">
+            <div>
+              <p className="avatar-name">Dr. Valdemar &ldquo;Vavá&rdquo; Braga</p>
+              <p className="avatar-role">Presidente da Câmara · PMD/DF</p>
+            </div>
+            <div className="eq-bars" aria-hidden="true">
+              {eqHeights.map((h, idx) => (
+                <span
+                  key={idx}
+                  className="eq-bar"
                   style={{
-                    width: `${isMuted ? 0 : Math.min(100, Math.round(inputLevel * 100))}%`,
+                    height: `${h}px`,
+                    background:
+                      activeMood === "crise"
+                        ? "var(--danger)"
+                        : activeMood === "acordo" || activeMood === "sussurro"
+                        ? "var(--gold)"
+                        : activeMood === "telefone"
+                        ? "var(--amber)"
+                        : "var(--emerald)",
                   }}
                 />
-              </div>
-              <span className="timer-inline">{formatTimer(remainingSeconds)}</span>
-              <button
-                type="button"
-                className="timer-extend"
-                onClick={onExtendSession}
-              >
-                +3m
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Pasta de Documentos Oficiais da Audiência */}
-        {documents.length > 0 && (
-          <div className="desk-folder">
-            <span className="desk-folder-label">
-              Pasta da Mesa ({documents.length})
-            </span>
-            <div className="desk-folder-list">
-              {documents.map((doc) => (
-                <button
-                  key={doc.id}
-                  type="button"
-                  className="doc-pill-btn"
-                  onClick={() => onInspectDocument(doc)}
-                >
-                  <FileText size={13} />
-                  {doc.action.type === "carimbar_emenda"
-                    ? `Emenda R$ ${doc.action.valorMilhoes}M`
-                    : doc.action.type === "nomear_dou"
-                    ? `DOU · ${doc.action.simbolo}`
-                    : "Dossiê"}
-                </button>
               ))}
             </div>
           </div>
-        )}
+        </div>
 
-        {error && <div className="error-banner">{error}</div>}
+        <div className="stage-controls">
+          <div className="mobile-stage-meta">
+            <div className="mobile-stage-id">
+              <strong>Dr. Vavá Braga</strong>
+              <span>{MOOD_LABELS[activeMood]}</span>
+            </div>
+          </div>
+
+          <div className="primary-cta-row">
+            {status !== "live" ? (
+              <button
+                type="button"
+                className="btn-voice"
+                disabled={status === "connecting"}
+                onClick={onStartLive}
+              >
+                <Mic size={16} />
+                <span className="cta-desktop-label">
+                  {status === "connecting"
+                    ? "Entrando no gabinete..."
+                    : "Falar ao vivo com o Vavá"}
+                </span>
+                <span className="cta-mobile-label">
+                  {status === "connecting" ? "Conectando..." : "Voz ao vivo"}
+                </span>
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className={`btn-secondary ${isMuted ? "is-muted" : ""}`}
+                  disabled={isForceMuted}
+                  onClick={onToggleMute}
+                  aria-label={isMuted ? "Ativar microfone" : "Silenciar microfone"}
+                >
+                  {isMuted ? <MicOff size={16} /> : <Mic size={16} />}
+                  {isForceMuted ? "Cortado" : isMuted ? "Mutado" : "Mic"}
+                </button>
+                <button
+                  type="button"
+                  className="btn-voice is-danger"
+                  onClick={onStopLive}
+                >
+                  <PhoneOff size={16} />
+                  Encerrar
+                </button>
+              </>
+            )}
+          </div>
+
+          {status === "live" && (
+            <div className="live-footer-meta">
+              <div className="mic-meter-row">
+                <span>{isForceMuted ? "CORTE" : isMuted ? "MUDO" : "MIC"}</span>
+                <div className="mic-meter-track">
+                  <div
+                    className="mic-meter-fill"
+                    style={{
+                      width: `${isMuted ? 0 : Math.min(100, Math.round(inputLevel * 100))}%`,
+                    }}
+                  />
+                </div>
+                <span className="timer-inline">{formatTimer(remainingSeconds)}</span>
+                <button
+                  type="button"
+                  className="timer-extend"
+                  onClick={onExtendSession}
+                >
+                  +3m
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Pasta de Documentos Oficiais da Audiência */}
+          {documents.length > 0 && (
+            <div className="desk-folder">
+              <span className="desk-folder-label">
+                Pasta da Mesa ({documents.length})
+              </span>
+              <div className="desk-folder-list">
+                {documents.map((doc) => (
+                  <button
+                    key={doc.id}
+                    type="button"
+                    className="doc-pill-btn"
+                    onClick={() => onInspectDocument(doc)}
+                  >
+                    <FileText size={13} />
+                    {doc.action.type === "carimbar_emenda"
+                      ? `Emenda R$ ${doc.action.valorMilhoes}M`
+                      : doc.action.type === "nomear_dou"
+                      ? `DOU · ${doc.action.simbolo}`
+                      : "Dossiê"}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {error && <div className="error-banner">{error}</div>}
+        </div>
       </div>
     </aside>
   );

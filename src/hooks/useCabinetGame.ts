@@ -210,7 +210,7 @@ export function useCabinetGame() {
           }, 3400);
         }
 
-        // Execute tactile Cabinet Actions
+        // Execute tactile Cabinet Actions (Documents appear as inline clickable cards — never hijacking the screen!)
         if (firedAction.type === "bater_martelo") {
           triggerGavelShake();
           params.onSystemEvent(`🔨 Mesa Diretora: ${firedAction.motivo}`);
@@ -223,22 +223,10 @@ export function useCabinetGame() {
           );
         } else if (firedAction.type === "carimbar_emenda" && newDocument) {
           cabinetSfx.playStampThud();
-          setActiveDocument(newDocument);
-          params.onSystemEvent(
-            `📜 Emenda ${firedAction.protocolo} carimbada: R$ ${firedAction.valorMilhoes}M (${firedAction.destino}) — confira o jabuti no rodapé!`
-          );
         } else if (firedAction.type === "nomear_dou" && newDocument) {
           cabinetSfx.playStampThud();
-          setActiveDocument(newDocument);
-          params.onSystemEvent(
-            `📰 Publicado no Diário Oficial: ${firedAction.nomeado} nomeado(a) como ${firedAction.cargo} (${firedAction.simbolo})!`
-          );
         } else if (firedAction.type === "puxar_dossie" && newDocument) {
           cabinetSfx.playDossierSlide();
-          setActiveDocument(newDocument);
-          params.onSystemEvent(
-            `📂 Dr. Vavá abriu a Gaveta da Presidência: "${firedAction.titulo}"`
-          );
         }
 
         // Check if an organic Brasília Backstage Interrupt should fire!
@@ -330,7 +318,7 @@ export function useCabinetGame() {
           window.setTimeout(() => setShowSummary(true), 1200);
         }
 
-        return { patch, ledger: finalLedger };
+        return { patch, ledger: finalLedger, newDocument };
       } catch {
         return null;
       }

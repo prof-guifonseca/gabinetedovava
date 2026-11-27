@@ -19,7 +19,7 @@ import {
   inferMoodFromText,
   type RecentTurn,
 } from "./shared/persona";
-import type { ScenarioId } from "./shared/gameState";
+import type { CabinetDocument, ScenarioId } from "./shared/gameState";
 import { SCENARIOS } from "./shared/scenarios";
 
 function createOpeningEntries(scenarioId: ScenarioId): ChatEntry[] {
@@ -99,6 +99,20 @@ export default function App() {
         source: "live",
         timestamp: formatNow(),
         text,
+      },
+    ]);
+  }, []);
+
+  const appendDocumentCard = useCallback((doc: CabinetDocument) => {
+    setEntries((prev) => [
+      ...prev,
+      {
+        id: makeId("doc"),
+        role: "system",
+        source: "text",
+        timestamp: formatNow(),
+        text: "",
+        document: doc,
       },
     ]);
   }, []);
@@ -194,9 +208,12 @@ export default function App() {
             }
             return copy;
           });
+          if (res.newDocument) {
+            appendDocumentCard(res.newDocument);
+          }
         });
     },
-    [appendSystemEvent, game]
+    [appendDocumentCard, appendSystemEvent, game]
   );
 
   const live = useGptLiveSession({
@@ -305,6 +322,43 @@ export default function App() {
       let fullReply = "";
       const contentType = res.headers.get("Content-Type") || "";
 
+      const processSseBlock = (block: string) => {
+        let eventName = "message";
+        let dataLine = "";
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event:")) {
+            eventName = line.slice(6).trim();
+          } else if (line.startsWith("data:")) {
+            dataLine += line.slice(5).trim();
+          }
+        }
+        if (!dataLine) return;
+        try {
+          const payload = JSON.parse(dataLine) as {
+            delta?: string;
+            reply?: string;
+          };
+          if (eventName === "delta" && payload.delta) {
+            fullReply += payload.delta;
+            const liveText = fullReply;
+            setEntries((prev) =>
+              prev.map((item) =>
+                item.id === replyId ? { ...item, text: liveText } : item
+              )
+            );
+          } else if (eventName === "done" && payload.reply) {
+            fullReply = payload.reply;
+            setEntries((prev) =>
+              prev.map((item) =>
+                item.id === replyId ? { ...item, text: fullReply } : item
+              )
+            );
+          }
+        } catch {
+          // ignore malformed SSE packet
+        }
+      };
+
       if (contentType.includes("text/event-stream") && res.body) {
         // Insert live streaming bubble
         setEntries((prev) => [
@@ -326,47 +380,16 @@ export default function App() {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          buffer += decoder.decode(value, { stream: true });
+          buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
 
           const blocks = buffer.split("\n\n");
           buffer = blocks.pop() ?? "";
-
           for (const block of blocks) {
-            let eventName = "message";
-            let dataLine = "";
-            for (const line of block.split("\n")) {
-              if (line.startsWith("event:")) {
-                eventName = line.slice(6).trim();
-              } else if (line.startsWith("data:")) {
-                dataLine += line.slice(5).trim();
-              }
-            }
-            if (!dataLine) continue;
-            try {
-              const payload = JSON.parse(dataLine) as {
-                delta?: string;
-                reply?: string;
-              };
-              if (eventName === "delta" && payload.delta) {
-                fullReply += payload.delta;
-                const liveText = fullReply;
-                setEntries((prev) =>
-                  prev.map((item) =>
-                    item.id === replyId ? { ...item, text: liveText } : item
-                  )
-                );
-              } else if (eventName === "done" && payload.reply) {
-                fullReply = payload.reply;
-                setEntries((prev) =>
-                  prev.map((item) =>
-                    item.id === replyId ? { ...item, text: fullReply } : item
-                  )
-                );
-              }
-            } catch {
-              // ignore malformed SSE packet
-            }
+            processSseBlock(block);
           }
+        }
+        if (buffer.trim()) {
+          processSseBlock(buffer);
         }
       } else {
         const data = (await res.json().catch(() => ({}))) as { reply?: string };
@@ -386,26 +409,34 @@ export default function App() {
         }
       }
 
+      // UNLOCK CHAT IMMEDIATELY after reply finishes — run AI Director asynchronously in background!
+      setIsSendingText(false);
+
       if (fullReply.trim()) {
         const fallbackMood = inferMoodFromText(fullReply, "falando");
         game.setTransientMood(fallbackMood);
 
-        // Run AI Director sidecar for mood, meters, Cabinet Actions, anti-repetition & interrupts
-        const directorOutcome = await game.evaluateTurnWithDirector({
-          userMessage: message,
-          assistantReply: fullReply,
-          accessCode,
-          nowLabel: formatNow(),
-          isLive: false,
-          onSystemEvent: appendSystemEvent,
-        });
-
-        const finalMood = directorOutcome?.patch.mood || fallbackMood;
-        setEntries((prev) =>
-          prev.map((item) =>
-            item.id === replyId ? { ...item, mood: finalMood } : item
-          )
-        );
+        void game
+          .evaluateTurnWithDirector({
+            userMessage: message,
+            assistantReply: fullReply,
+            accessCode,
+            nowLabel: formatNow(),
+            isLive: false,
+            onSystemEvent: appendSystemEvent,
+          })
+          .then((directorOutcome) => {
+            if (!directorOutcome) return;
+            const finalMood = directorOutcome.patch.mood || fallbackMood;
+            setEntries((prev) =>
+              prev.map((item) =>
+                item.id === replyId ? { ...item, mood: finalMood } : item
+              )
+            );
+            if (directorOutcome.newDocument) {
+              appendDocumentCard(directorOutcome.newDocument);
+            }
+          });
       }
     } catch {
       appendSystemEvent("Falha de conexão com o gabinete.");
@@ -502,6 +533,7 @@ export default function App() {
             micCutSecondsLeft={game.micCutSecondsLeft}
             onSendText={(msg) => void handleSendText(msg)}
             onToggleVoiceCall={handleToggleVoiceCall}
+            onInspectDocument={(doc) => game.setActiveDocument(doc)}
           />
         </main>
       </div>

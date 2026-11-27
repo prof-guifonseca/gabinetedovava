@@ -782,35 +782,52 @@ app.post("/api/director", async (c) => {
     });
   }
 
-  const model = c.env.OPENAI_TEXT_MODEL || "gpt-6-luna";
+  const model =
+    (c.env as unknown as Record<string, string | undefined>).OPENAI_DIRECTOR_MODEL ||
+    c.env.OPENAI_TEXT_MODEL ||
+    "gpt-6-luna";
 
-  try {
-    const upstream = await fetch("https://api.openai.com/v1/responses", {
+  const callDirector = async (reasoningEffort?: "minimal" | "low") => {
+    const payload: Record<string, unknown> = {
+      model,
+      instructions: buildDirectorInstructions(ledger),
+      input: [
+        {
+          role: "user",
+          content: `Visitante disse: "${userMessage || "(início / fala por voz)"}"\nVavá respondeu: "${assistantReply}"`,
+        },
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "cabinet_director_patch",
+          strict: true,
+          schema: DIRECTOR_RESPONSE_SCHEMA,
+        },
+      },
+      max_output_tokens: 1400,
+    };
+    if (reasoningEffort) {
+      payload.reasoning = { effort: reasoningEffort };
+    }
+    return fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${c.env.OPENAI_API_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        model,
-        instructions: buildDirectorInstructions(ledger),
-        input: [
-          {
-            role: "user",
-            content: `Visitante disse: "${userMessage || "(início / fala por voz)"}"\nVavá respondeu: "${assistantReply}"`,
-          },
-        ],
-        text: {
-          format: {
-            type: "json_schema",
-            name: "cabinet_director_patch",
-            strict: true,
-            schema: DIRECTOR_RESPONSE_SCHEMA,
-          },
-        },
-        max_output_tokens: 1800,
-      }),
+      body: JSON.stringify(payload),
     });
+  };
+
+  try {
+    let upstream = await callDirector("minimal");
+    if (!upstream.ok && (upstream.status === 400 || upstream.status === 422)) {
+      upstream = await callDirector("low");
+    }
+    if (!upstream.ok && (upstream.status === 400 || upstream.status === 422)) {
+      upstream = await callDirector(undefined);
+    }
 
     if (!upstream.ok) {
       const errDetail = await upstream.text();
