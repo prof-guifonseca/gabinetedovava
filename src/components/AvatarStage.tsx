@@ -1,17 +1,28 @@
 import type { CSSProperties } from "react";
-import { Mic, MicOff, PhoneOff } from "lucide-react";
-import type { AvatarMood } from "../shared/persona";
+import { FileText, Mic, MicOff, PhoneOff, Radio, ShieldOff } from "lucide-react";
+import type {
+  AvatarMood,
+  BackstageInterrupt,
+  CabinetDocument,
+} from "../shared/gameState";
 import type { LiveConnectionState } from "../hooks/useGptLiveSession";
 
 interface AvatarStageProps {
   mood: AvatarMood;
   status: LiveConnectionState;
   isSpeaking: boolean;
+  isStandby: boolean;
   isMuted: boolean;
+  isForceMuted: boolean;
+  isGavelShaking: boolean;
+  micCutSecondsLeft: number;
   voiceLevel: number;
   inputLevel: number;
   remainingSeconds: number;
   error: string | null;
+  activeInterrupt: BackstageInterrupt | null;
+  documents: CabinetDocument[];
+  onInspectDocument: (doc: CabinetDocument) => void;
   onStartLive: () => void;
   onStopLive: () => void;
   onToggleMute: () => void;
@@ -23,6 +34,17 @@ const AVATAR_SOURCES: Record<AvatarMood, string> = {
   falando: "/avatars/vava-falando.jpg",
   acordo: "/avatars/vava-acordo.jpg",
   crise: "/avatars/vava-crise.jpg",
+  sussurro: "/avatars/vava-sussurro.jpg",
+  telefone: "/avatars/vava-telefone.jpg",
+};
+
+const MOOD_LABELS: Record<AvatarMood, string> = {
+  neutro: "No gabinete",
+  falando: "Com a palavra",
+  acordo: "Clima de composição",
+  crise: "Pela ordem!",
+  sussurro: "Em off...",
+  telefone: "Na linha · Bastidor",
 };
 
 function formatTimer(seconds: number): string {
@@ -35,11 +57,18 @@ export function AvatarStage({
   mood,
   status,
   isSpeaking,
+  isStandby,
   isMuted,
+  isForceMuted,
+  isGavelShaking,
+  micCutSecondsLeft,
   voiceLevel,
   inputLevel,
   remainingSeconds,
   error,
+  activeInterrupt,
+  documents,
+  onInspectDocument,
   onStartLive,
   onStopLive,
   onToggleMute,
@@ -61,7 +90,10 @@ export function AvatarStage({
   } as CSSProperties;
 
   return (
-    <aside className="panel-card avatar-stage" aria-label="Dep. Vavá Braga">
+    <aside
+      className={`panel-card avatar-stage ${isGavelShaking ? "is-gavel-shaking" : ""}`}
+      aria-label="Dep. Vavá Braga"
+    >
       <div
         className={`avatar-viewport ${isSpeaking ? "is-speaking" : ""}`}
         data-mood={activeMood}
@@ -79,10 +111,43 @@ export function AvatarStage({
         <div className="avatar-vignette" />
         <div className="avatar-halo" />
 
+        {/* GC / Tarja TV Câmara */}
+        <div className="tv-camara-bug">
+          <span className={`tv-dot ${status === "live" ? "is-live" : ""}`} />
+          <span>
+            {status === "live"
+              ? isStandby
+                ? "EM ESPERA · GAB. 412"
+                : "AO VIVO · TV CÂMARA"
+              : "GABINETE 412 · ANEXO IV"}
+          </span>
+          <span className="tv-mood-pill">{MOOD_LABELS[activeMood]}</span>
+        </div>
+
+        {/* Alerta de Interrupção de Bastidor (Dona Neide / TCU / Plenário) */}
+        {activeInterrupt && (
+          <div className="interrupt-ribbon" role="status">
+            <Radio size={13} />
+            <div>
+              <strong>{activeInterrupt.badge}</strong>
+              <span>{activeInterrupt.headline}</span>
+            </div>
+          </div>
+        )}
+
+        {/* Selo de Áudio Cortado pela Taquigrafia */}
+        {micCutSecondsLeft > 0 && (
+          <div className="mic-cut-overlay" role="alert">
+            <ShieldOff size={22} />
+            <strong>ÁUDIO CORTADO PELA TAQUIGRAFIA</strong>
+            <span>Restabelecendo em {micCutSecondsLeft}s...</span>
+          </div>
+        )}
+
         <div className="avatar-caption">
           <div>
             <p className="avatar-name">Dr. Valdemar &ldquo;Vavá&rdquo; Braga</p>
-            <p className="avatar-role">Presidente da Câmara</p>
+            <p className="avatar-role">Presidente da Câmara · PMD/DF</p>
           </div>
           <div className="eq-bars" aria-hidden="true">
             {eqHeights.map((h, idx) => (
@@ -94,8 +159,10 @@ export function AvatarStage({
                   background:
                     activeMood === "crise"
                       ? "var(--danger)"
-                      : activeMood === "acordo"
+                      : activeMood === "acordo" || activeMood === "sussurro"
                       ? "var(--gold)"
+                      : activeMood === "telefone"
+                      ? "var(--amber)"
                       : "var(--emerald)",
                 }}
               />
@@ -116,18 +183,19 @@ export function AvatarStage({
               <Mic size={18} />
               {status === "connecting"
                 ? "Entrando no gabinete..."
-                : "Falar com o Vavá"}
+                : "Falar ao vivo com o Vavá"}
             </button>
           ) : (
             <>
               <button
                 type="button"
                 className={`btn-secondary ${isMuted ? "is-muted" : ""}`}
+                disabled={isForceMuted}
                 onClick={onToggleMute}
                 aria-label={isMuted ? "Ativar microfone" : "Silenciar microfone"}
               >
                 {isMuted ? <MicOff size={17} /> : <Mic size={17} />}
-                {isMuted ? "Mutado" : "Mic"}
+                {isForceMuted ? "Cortado" : isMuted ? "Mutado" : "Mic"}
               </button>
               <button
                 type="button"
@@ -144,7 +212,7 @@ export function AvatarStage({
         {status === "live" && (
           <div className="live-footer-meta">
             <div className="mic-meter-row">
-              <span>{isMuted ? "MUDO" : "MIC"}</span>
+              <span>{isForceMuted ? "CORTE" : isMuted ? "MUDO" : "MIC"}</span>
               <div className="mic-meter-track">
                 <div
                   className="mic-meter-fill"
@@ -161,6 +229,32 @@ export function AvatarStage({
               >
                 +3m
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* Pasta de Documentos Oficiais da Audiência */}
+        {documents.length > 0 && (
+          <div className="desk-folder">
+            <span className="desk-folder-label">
+              Pasta da Mesa ({documents.length})
+            </span>
+            <div className="desk-folder-list">
+              {documents.map((doc) => (
+                <button
+                  key={doc.id}
+                  type="button"
+                  className="doc-pill-btn"
+                  onClick={() => onInspectDocument(doc)}
+                >
+                  <FileText size={13} />
+                  {doc.action.type === "carimbar_emenda"
+                    ? `Emenda R$ ${doc.action.valorMilhoes}M`
+                    : doc.action.type === "nomear_dou"
+                    ? `DOU · ${doc.action.simbolo}`
+                    : "Dossiê"}
+                </button>
+              ))}
             </div>
           </div>
         )}

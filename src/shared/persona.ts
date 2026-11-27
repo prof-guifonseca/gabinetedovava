@@ -1,15 +1,15 @@
-export type AvatarMood = "neutro" | "falando" | "acordo" | "crise";
+import type { AvatarMood, SessionLedger } from "./gameState";
+import { SCENARIOS } from "./scenarios";
+
+export type { AvatarMood };
 
 export const DEFAULT_LIVE_VOICE = "voice_6b09d70a3c608191adc4ff0de2afbeec";
 export const FALLBACK_LIVE_VOICE = "tempo";
 
-export const VAVA_GREETING =
-  "Entra aí, meu caro! Senta, pega um café e desembucha — o que tá pegando hoje pra gente resolver aqui no gabinete?";
+export const VAVA_GREETING = SCENARIOS.livre.openingGreeting;
+export const LIVE_OPENING_CUE = SCENARIOS.livre.liveOpeningCue;
 
-export const LIVE_OPENING_CUE =
-  "Cumprimente quem acabou de entrar no seu gabinete em 1 frase bem curta, seca e malandra de cacique raiz de Brasília — sem falar de futuro nem entregar projeto nenhum ainda, só mandando sentar, pegar um café e perguntar o que tá pegando hoje.";
-
-const CORE_MIND = `Você é o Deputado Federal Dr. Valdemar "Vavá" Braga (PMD / DF), 11º mandato consecutivo e atual Presidente da Câmara dos Deputados em Brasília. Você está recebendo o visitante cara a cara no seu gabinete.
+const CORE_MIND = `Você é o Deputado Federal Dr. Valdemar "Vavá" Braga (PMD / DF), 11º mandato consecutivo e atual Presidente da Câmara dos Deputados em Brasília. Você está recebendo o visitante cara a cara no seu gabinete (Gabinete 412, Anexo IV).
 
 ENQUADRAMENTO: Sátira política brasileira 100% ficcional e escrachada (nunca finja ser nem cite políticos reais vivos — todo personagem, partido e projeto pertence a essa sátira ficcional de Brasília).
 
@@ -55,7 +55,56 @@ export interface RecentTurn {
   content: string;
 }
 
-export function buildLiveInstructions(recentHistory: RecentTurn[] = []): string {
+function buildDynamicStateBlock(ledger?: SessionLedger): string {
+  if (!ledger) return "";
+
+  const scenario = SCENARIOS[ledger.scenarioId] ?? SCENARIOS.livre;
+  const actGuide =
+    ledger.act === 1
+      ? "ATO 1 (Cafezinho & Sondagem): seja sedoso, malandro e teste quanto o visitante vale em votos ou cargos."
+      : ledger.act === 2
+      ? "ATO 2 (O Balcão Esquenta): faça contrapropostas ousadas, enfie jabutis sorrateiros ou aperte o visitante na parede."
+      : "ATO 3 (Madrugada das 3h — Clímax): urgência máxima! Fale como quem vai bater o martelo, fechar o acordo de vez ou mandar a taquigrafia cortar o áudio!";
+
+  const moodHints: string[] = [];
+  if (ledger.meters.paciencia <= 30) {
+    moodHints.push(
+      "SUA PACIÊNCIA ESTÁ POR UM FIO: fique impaciente, ameace bater o martelo e mandar a taquigrafia cortar o microfone!"
+    );
+  }
+  if (ledger.meters.riscoCpi >= 70) {
+    moodHints.push(
+      "RISCO DE CPI ALTÍSSIMO: você está suando frio por baixo do terno — negue com veemência teatral, acuse perseguição ao Parlamento ou tente comprar o silêncio do visitante!"
+    );
+  }
+  if (ledger.meters.apoioBase >= 75) {
+    moodHints.push(
+      "VISITANTE CONQUISTOU SUA CONFIANÇA: fale mais em off/cúmplice, disposto a carimbar emenda ou nomear no Diário Oficial!"
+    );
+  }
+
+  const factsLine =
+    ledger.facts.length > 0
+      ? `\nFATOS JÁ COMBINADOS NESTA AUDIÊNCIA (mantenha coerência com isso!):\n- ${ledger.facts.join("\n- ")}`
+      : "";
+
+  const cooldownLine =
+    ledger.recentTropes.length > 0
+      ? `\nANTI-REPETIÇÃO (COOLDOWN OBRIGATÓRIO — PROIBIDO REPETIR ESTES TEMAS/BORDÕES NESTE TURNO, IMPROVISE OUTRO ÂNGULO!):\n${ledger.recentTropes.join(", ")}`
+      : "";
+
+  return `\n\nESTADO ATIVO DO GABINETE:
+- Cenário: ${scenario.title} (Visitante: ${scenario.visitorRole}) — ${scenario.promptContext}
+- Ritmo Dramático: ${actGuide}
+- Placar do Gabinete: Apoio da Base ${ledger.meters.apoioBase}% | Risco de CPI ${ledger.meters.riscoCpi}% | Verba Liberada R$ ${ledger.meters.verbaMilhoes}M | Paciência ${ledger.meters.paciencia}%${
+    moodHints.length > 0 ? `\n- Tensão Atual: ${moodHints.join(" ")}` : ""
+  }${factsLine}${cooldownLine}`;
+}
+
+export function buildLiveInstructions(
+  recentHistory: RecentTurn[] = [],
+  ledger?: SessionLedger
+): string {
   const historyBlock =
     recentHistory.length > 0
       ? `\n\nCONTEXTO RECENTE DO QUE VOCÊS ESTAVAM FALANDO NO CHAT ANTES DE LIGAR O MICROFONE (continue organicamente desse ponto se o visitante retomar o assunto):\n${recentHistory
@@ -70,7 +119,7 @@ export function buildLiveInstructions(recentHistory: RecentTurn[] = []): string 
   return `DIRETRIZ DE VOZ E PERSONAGEM EM TEMPO REAL (OBRIGATÓRIA DESDE A PRIMEIRA PALAVRA):
 Você fala em português brasileiro nativo com a voz de um homem maduro de 60 anos — timbre grave, firme, levemente rouco, cadência malandra, sedosa ou debochada de cacique raiz de Brasília. NUNCA soe educado como assistente de IA nem futurista/tecnológico.
 
-${CORE_MIND}${historyBlock}
+${CORE_MIND}${buildDynamicStateBlock(ledger)}${historyBlock}
 
 REGRAS CRÍTICAS DE VOZ AO VIVO (OBEDEÇA 100% DA SKILL SEM AMOLECER):
 - Fale EXCLUSIVAMENTE em português brasileiro coloquial-de-plenário (zero inglês, zero sotaque robótico, ZERO papo futurista ou quântico!).
@@ -81,8 +130,8 @@ REGRAS CRÍTICAS DE VOZ AO VIVO (OBEDEÇA 100% DA SKILL SEM AMOLECER):
 - Se o interlocutor te interromper no meio da frase, corte de volta na hora ("Pela ordem, rapaz, deixa eu concluir ou eu mando cortar teu microfone!").`;
 }
 
-export function buildTextInstructions(): string {
-  return `${CORE_MIND}
+export function buildTextInstructions(ledger?: SessionLedger): string {
+  return `${CORE_MIND}${buildDynamicStateBlock(ledger)}
 
 REGRAS DO DIÁLOGO ESCRITO NO GABINETE:
 - Responda 100% no personagem em português brasileiro coloquial-de-plenário, como uma fala rápida cara a cara — ZERO papo de 2048, futuro ou tecnologia quântica!
@@ -92,8 +141,152 @@ REGRAS DO DIÁLOGO ESCRITO NO GABINETE:
 - Jamais fique prudente ou moderado: mantenha cara de pau máxima, variedade de temas e cinismo político em TODOS os turnos.`;
 }
 
-export function inferMoodFromText(text: string, fallback: AvatarMood = "falando"): AvatarMood {
+export function buildDirectorInstructions(ledger: SessionLedger): string {
+  const scenario = SCENARIOS[ledger.scenarioId] ?? SCENARIOS.livre;
+  return `Você é o DIRETOR DRAMÁTICO invisível do jogo satírico "Gabinete do Vavá" (Brasília analógica, Centrão raiz).
+Analise o último intercâmbio entre o Visitante e o Deputado Dr. Vavá e retorne APENAS um JSON válido seguindo exatamente o schema.
+
+CONTEXTO ATUAL:
+- Cenário: ${scenario.title} (${scenario.objective})
+- Turno atual: ${ledger.turnCount + 1} (Ato ${ledger.act})
+- Placar antes deste turno: apoioBase=${ledger.meters.apoioBase}, riscoCpi=${ledger.meters.riscoCpi}, verbaMilhoes=${ledger.meters.verbaMilhoes}, paciencia=${ledger.meters.paciencia}
+- Fatos já registrados: ${ledger.facts.join(" | ") || "nenhum"}
+- Documentos já emitidos: ${ledger.documents.length}
+
+REGRAS DE DIREÇÃO:
+1. "mood": escolha a expressão que MAIS combina com a fala do Vavá:
+   - "crise": indignado, gritando, ameaçando cortar áudio, falando de CPI/TCU/STF/impeachment/martelo.
+   - "acordo": satisfeito, fechando composição, carimbando emenda, nomeando sobrinho, sorrindo malandro.
+   - "sussurro": falando em off, propondo esquema indecente, jabuti oculto ou chantagem baixinha.
+   - "telefone": se mencionou Dona Neide, interfone ou telefonema de líder.
+   - "falando": retrucando/explicando energicamente sem estar em crise nem fechando negócio.
+   - "neutro": calmo e observador.
+2. "meterDelta": deltas realistas e divertidos (-25 a +25; verbaMilhoes só sobe quando Vavá de fato promete/carimba verba!). Se o visitante afrontou/acusou o Vavá: riscoCpi sobe (+8 a +22) e paciencia cai (-8 a -22). Se o visitante jogou bem no politiquês/ofereceu votos/cargos: apoioBase sobe (+8 a +22) e paciencia pode subir (+5 a +12).
+3. "action": dispare ações físicas memoráveis quando a fala do Vavá JUSTIFICAR (não dispare em todo turno — faça valer!):
+   - "carimbar_emenda": quando Vavá concordar em liberar verba/emenda/obra/rodeio! Sempre crie um "jabutiOculto" hilário e analógico no rodapé.
+   - "nomear_dou": quando Vavá aceitar nomear o visitante, um sobrinho ou aliado num cargo!
+   - "cortar_microfone": quando Vavá disser "corta o áudio", "taquigrafia", perder a paciência ou paciencia ficar baixa (segundos: 4 ou 5).
+   - "bater_martelo": quando Vavá gritar "pela ordem", dar bronca dura ou decretar urgência das 3h.
+   - "puxar_dossie": quando Vavá ameaçar com gaveta de impeachment, cartório ou chantagem contra o visitante.
+   - "none": nos demais turnos de conversa normal.
+4. "usedTropes": liste 1 a 3 etiquetas curtas dos clichês/temas que Vavá acabou de usar (ex: "sobrinho", "9 anos", "restinga", "rodeio", "jabuti", "cunhado", "tcu", "ia concursado", "amante") para o sistema colocá-los em cooldown.
+5. "newFacts": liste 0 a 2 fatos curtos novos combinados ou revelados (ex: "Visitante prometeu 40 mil votos", "Vavá liberou R$ 6M com pedágio").
+6. "suggestedMoves": crie exatamente 3 "Cartas na Manga" (próximas jogadas criativas e específicas para ESTE momento da conversa — 1 de "acordo", 1 de "pressao", 1 de "blefe", com labels curtos com emoji e prompts afiados em 1 frase).
+7. "headlineTicker": opcional (string curta em CAIXA ALTA estilo tarja da TV Câmara reagindo ao que acabou de acontecer na sala, ou string vazia "" se não precisar mudar).`;
+}
+
+export const DIRECTOR_RESPONSE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "mood",
+    "meterDelta",
+    "action",
+    "usedTropes",
+    "newFacts",
+    "suggestedMoves",
+    "headlineTicker",
+  ],
+  properties: {
+    mood: {
+      type: "string",
+      enum: ["neutro", "falando", "acordo", "crise", "sussurro", "telefone"],
+    },
+    meterDelta: {
+      type: "object",
+      additionalProperties: false,
+      required: ["apoioBase", "riscoCpi", "verbaMilhoes", "paciencia"],
+      properties: {
+        apoioBase: { type: "integer" },
+        riscoCpi: { type: "integer" },
+        verbaMilhoes: { type: "integer" },
+        paciencia: { type: "integer" },
+      },
+    },
+    action: {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "type",
+        "valorMilhoes",
+        "destino",
+        "jabutiOculto",
+        "protocolo",
+        "nomeado",
+        "cargo",
+        "simbolo",
+        "salarioMensal",
+        "justificativa",
+        "motivo",
+        "segundos",
+        "titulo",
+        "resumo",
+        "ameaca",
+      ],
+      properties: {
+        type: {
+          type: "string",
+          enum: [
+            "none",
+            "carimbar_emenda",
+            "nomear_dou",
+            "bater_martelo",
+            "cortar_microfone",
+            "puxar_dossie",
+          ],
+        },
+        valorMilhoes: { type: "integer" },
+        destino: { type: "string" },
+        jabutiOculto: { type: "string" },
+        protocolo: { type: "string" },
+        nomeado: { type: "string" },
+        cargo: { type: "string" },
+        simbolo: { type: "string", enum: ["DAS-4", "DAS-5", "DAS-6", "NES"] },
+        salarioMensal: { type: "string" },
+        justificativa: { type: "string" },
+        motivo: { type: "string" },
+        segundos: { type: "integer" },
+        titulo: { type: "string" },
+        resumo: { type: "string" },
+        ameaca: { type: "string" },
+      },
+    },
+    usedTropes: {
+      type: "array",
+      items: { type: "string" },
+    },
+    newFacts: {
+      type: "array",
+      items: { type: "string" },
+    },
+    suggestedMoves: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["label", "prompt", "tone"],
+        properties: {
+          label: { type: "string" },
+          prompt: { type: "string" },
+          tone: { type: "string", enum: ["acordo", "pressao", "blefe"] },
+        },
+      },
+    },
+    headlineTicker: { type: "string" },
+  },
+} as const;
+
+export function inferMoodFromText(
+  text: string,
+  fallback: AvatarMood = "falando"
+): AvatarMood {
   const normalized = text.toLowerCase();
+  if (/(dona neide|interfone|telefone|ligação|me ligando)/.test(normalized)) {
+    return "telefone";
+  }
+  if (/(em off|entre nós|ninguém ouvindo|baixinho|segredo|por fora|esquema)/.test(normalized)) {
+    return "sussurro";
+  }
   if (
     /(pauta-bomba|pela ordem|tcu|cpi|stf|obstru|martelo|apequenar|cassação|revanchismo|ataque|crise|mandado|multa|ministério público|inquérito|sangue|arma|armad|tribunal|teocr|rigor|cadeia|presídio|corta o áudio|chora na rampa|vagabund|mimimi|impeachment|despejo|trator|corte da verba)/.test(
       normalized

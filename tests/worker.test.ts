@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_LIVE_VOICE,
   VAVA_GREETING,
@@ -6,7 +6,13 @@ import {
   buildTextInstructions,
   inferMoodFromText,
 } from "../src/shared/persona";
-import worker, { formatLiveVoiceParam, parseLiveVoice } from "../worker/index";
+import worker, {
+  buildFallbackDirectorPatch,
+  formatLiveVoiceParam,
+  parseLiveVoice,
+  resetRateLimitStore,
+} from "../worker/index";
+import { createInitialLedger } from "../src/shared/scenarios";
 
 function createTestEnv(overrides: Partial<Env> = {}): Env {
   return {
@@ -26,6 +32,10 @@ const dummyCtx = {
   waitUntil: () => {},
   passThroughOnException: () => {},
 } as unknown as ExecutionContext;
+
+beforeEach(() => {
+  resetRateLimitStore();
+});
 
 describe("Mente do Vavá (zero prudência, Live + Texto alinhados à skill)", () => {
   it("keeps opening greeting short and spoiler-free", () => {
@@ -70,26 +80,44 @@ describe("Mente do Vavá (zero prudência, Live + Texto alinhados à skill)", ()
   it("defaults live voice to custom mature Brazilian voice ID and formats it as { id }", () => {
     expect(DEFAULT_LIVE_VOICE).toMatch(/^voice_/);
     expect(parseLiveVoice(DEFAULT_LIVE_VOICE, "tempo")).toBe(DEFAULT_LIVE_VOICE);
-    expect(parseLiveVoice("invalid_voice", DEFAULT_LIVE_VOICE)).toBe(DEFAULT_LIVE_VOICE);
-    expect(formatLiveVoiceParam(DEFAULT_LIVE_VOICE)).toEqual({ id: DEFAULT_LIVE_VOICE });
+    expect(parseLiveVoice("invalid_voice", DEFAULT_LIVE_VOICE)).toBe(
+      DEFAULT_LIVE_VOICE
+    );
+    expect(formatLiveVoiceParam(DEFAULT_LIVE_VOICE)).toEqual({
+      id: DEFAULT_LIVE_VOICE,
+    });
     expect(formatLiveVoiceParam("tempo")).toBe("tempo");
   });
 
-  it("infers avatar mood cleanly from reply content", () => {
-    expect(inferMoodFromText("Corta o áudio dele, taquigrafia! Chora na rampa!")).toBe("crise");
-    expect(inferMoodFromText("Truste familiar no cartório do compadre com os meninos da base")).toBe("acordo");
-    expect(inferMoodFromText("Pega um cafezinho aí!")).toBe("acordo");
-    expect(inferMoodFromText("Olha só o que eu penso sobre isso.")).toBe("falando");
+  it("infers all 6 avatar moods cleanly from complete phrases", () => {
+    expect(
+      inferMoodFromText("Corta o áudio dele, taquigrafia! Chora na rampa!")
+    ).toBe("crise");
+    expect(
+      inferMoodFromText(
+        "Truste familiar no cartório do compadre com os meninos da base"
+      )
+    ).toBe("acordo");
+    expect(inferMoodFromText("Em off aqui entre nós, ninguém ouvindo...")).toBe(
+      "sussurro"
+    );
+    expect(
+      inferMoodFromText("Peraí que a Dona Neide tá chamando no interfone!")
+    ).toBe("telefone");
+    expect(inferMoodFromText("Olha só o que eu penso sobre isso.")).toBe(
+      "falando"
+    );
   });
 });
 
-describe("Gabinete do Vavá Worker API", () => {
-  it("GET /api/health returns live/text models and custom voice without TTS or secrets", async () => {
+describe("Gabinete do Vavá 2.0 Worker API", () => {
+  it("GET /api/health returns v2.0 live/text models and custom voice without secrets", async () => {
     const req = new Request("https://gabinetedovava.pages.dev/api/health");
     const res = await worker.fetch(req, createTestEnv(), dummyCtx);
     expect(res.status).toBe(200);
     const data = (await res.json()) as Record<string, unknown>;
     expect(data.ok).toBe(true);
+    expect(data.version).toBe("2.0");
     expect(data.service).toBe("gabinetedovava");
     expect(data.liveModel).toBe("gpt-live-1.1");
     expect(data.textModel).toBe("gpt-6-luna");
@@ -98,28 +126,61 @@ describe("Gabinete do Vavá Worker API", () => {
     expect(JSON.stringify(data)).not.toContain("sk-test-dummy");
   });
 
+  it("POST /api/auth/verify validates ACCESS_CODE properly", async () => {
+    const env = createTestEnv({ ACCESS_CODE: "gabinete412" });
+
+    const badReq = new Request(
+      "https://gabinetedovava.pages.dev/api/auth/verify",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accessCode: "errada" }),
+      }
+    );
+    const badRes = await worker.fetch(badReq, env, dummyCtx);
+    expect(badRes.status).toBe(401);
+
+    const goodReq = new Request(
+      "https://gabinetedovava.pages.dev/api/auth/verify",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accessCode: "gabinete412" }),
+      }
+    );
+    const goodRes = await worker.fetch(goodReq, env, dummyCtx);
+    expect(goodRes.status).toBe(200);
+    expect(await goodRes.json()).toEqual({ ok: true });
+  });
+
   it("POST /api/live/session rejects invalid SDP payload with 400", async () => {
-    const req = new Request("https://gabinetedovava.pages.dev/api/live/session", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sdp: "invalid" }),
-    });
+    const req = new Request(
+      "https://gabinetedovava.pages.dev/api/live/session",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sdp: "invalid" }),
+      }
+    );
     const res = await worker.fetch(req, createTestEnv(), dummyCtx);
     expect(res.status).toBe(400);
   });
 
   it("POST /api/live/session enforces ACCESS_CODE when configured", async () => {
-    const req = new Request("https://gabinetedovava.pages.dev/api/live/session", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sdp: "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n",
-        accessCode: "errada",
-      }),
-    });
+    const req = new Request(
+      "https://gabinetedovava.pages.dev/api/live/session",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sdp: "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n",
+          accessCode: "errada",
+        }),
+      }
+    );
     const res = await worker.fetch(
       req,
-      createTestEnv({ ACCESS_CODE: "gabinete2048" }),
+      createTestEnv({ ACCESS_CODE: "gabinete412" }),
       dummyCtx
     );
     expect(res.status).toBe(401);
@@ -133,5 +194,43 @@ describe("Gabinete do Vavá Worker API", () => {
     });
     const res = await worker.fetch(req, createTestEnv(), dummyCtx);
     expect(res.status).toBe(400);
+  });
+
+  it("POST /api/director returns heuristic fallback cleanly when no API key is configured", async () => {
+    const ledger = createInitialLedger("livre");
+    const req = new Request("https://gabinetedovava.pages.dev/api/director", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userMessage: "Quero 4 milhões pro asfalto da minha base!",
+        assistantReply:
+          "Fechado, meu caro! Vou carimbar uma emenda de 4 milhões pro rodeio e asfalto da tua base!",
+        ledger,
+      }),
+    });
+    const res = await worker.fetch(
+      req,
+      createTestEnv({ OPENAI_API_KEY: "" }),
+      dummyCtx
+    );
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as {
+      source: string;
+      patch: { action: { type: string }; mood: string };
+    };
+    expect(data.source).toBe("fallback");
+    expect(data.patch.action.type).toBe("carimbar_emenda");
+    expect(data.patch.mood).toBe("acordo");
+  });
+
+  it("buildFallbackDirectorPatch triggers mic cut on taquigrafia phrases", () => {
+    const ledger = createInitialLedger("cpi_imprensa");
+    const patch = buildFallbackDirectorPatch(
+      "Onde está o dinheiro?",
+      "Corta o áudio dele, taquigrafia! Isso é ataque ao Parlamento!",
+      ledger
+    );
+    expect(patch.action.type).toBe("cortar_microfone");
+    expect(patch.mood).toBe("crise");
   });
 });

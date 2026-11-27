@@ -6,6 +6,7 @@ import {
   type AvatarMood,
   type RecentTurn,
 } from "../shared/persona";
+import type { SessionLedger } from "../shared/gameState";
 
 export type LiveConnectionState =
   | "idle"
@@ -19,11 +20,15 @@ export interface ChatEntry {
   text: string;
   source: "live" | "text";
   timestamp: string;
+  mood?: AvatarMood;
+  itemKey?: string;
 }
 
 interface ConnectOptions {
   voice?: string;
   history?: RecentTurn[];
+  ledger?: SessionLedger;
+  openingCue?: string;
   accessCode?: string;
 }
 
@@ -65,15 +70,23 @@ async function waitForIceGathering(
 }
 
 export function useGptLiveSession(options: {
-  onTranscriptDelta: (role: "user" | "assistant", delta: string) => void;
+  onTranscriptDelta: (
+    role: "user" | "assistant",
+    delta: string,
+    itemKey?: string,
+    replaceFull?: boolean
+  ) => void;
   onSystemEvent: (text: string) => void;
   onMoodHint: (mood: AvatarMood) => void;
+  onLiveTurnComplete?: (userText: string, assistantText: string) => void;
   onUnauthorized?: () => void;
 }) {
   const [status, setStatus] = useState<LiveConnectionState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [isMuted, setIsMuted] = useState(false);
+  const [isForceMuted, setIsForceMuted] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isStandby, setIsStandby] = useState(false);
   const [outputLevel, setOutputLevel] = useState(0);
   const [inputLevel, setInputLevel] = useState(0);
   const [remainingSeconds, setRemainingSeconds] = useState(SESSION_DURATION_SEC);
@@ -85,10 +98,31 @@ export function useGptLiveSession(options: {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const rafRef = useRef<number | null>(null);
   const timerRef = useRef<number | null>(null);
+  const forceMuteTimerRef = useRef<number | null>(null);
   const speakingHoldRef = useRef<number>(0);
+  const userMutedPrefRef = useRef<boolean>(false);
+  const openingCueRef = useRef<string>(LIVE_OPENING_CUE);
+
+  // Accumulated turn buffers (fixes fragmented-delta regex & duplicate input transcripts)
+  const lastUserUtteranceRef = useRef<string>("");
+  const currentAssistantUtteranceRef = useRef<string>("");
+  const inputDeltaItemIdsRef = useRef<Set<string>>(new Set());
+  const turnFlushTimerRef = useRef<number | null>(null);
 
   const callbacksRef = useRef(options);
   callbacksRef.current = options;
+
+  const flushCompletedLiveTurn = useCallback(() => {
+    if (turnFlushTimerRef.current !== null) {
+      window.clearTimeout(turnFlushTimerRef.current);
+      turnFlushTimerRef.current = null;
+    }
+    const assistantText = currentAssistantUtteranceRef.current.trim();
+    if (assistantText.length < 8) return;
+    const userText = lastUserUtteranceRef.current.trim();
+    currentAssistantUtteranceRef.current = "";
+    callbacksRef.current.onLiveTurnComplete?.(userText, assistantText);
+  }, []);
 
   const cleanup = useCallback(() => {
     if (rafRef.current !== null) {
@@ -98,6 +132,14 @@ export function useGptLiveSession(options: {
     if (timerRef.current !== null) {
       window.clearInterval(timerRef.current);
       timerRef.current = null;
+    }
+    if (forceMuteTimerRef.current !== null) {
+      window.clearTimeout(forceMuteTimerRef.current);
+      forceMuteTimerRef.current = null;
+    }
+    if (turnFlushTimerRef.current !== null) {
+      window.clearTimeout(turnFlushTimerRef.current);
+      turnFlushTimerRef.current = null;
     }
     if (dcRef.current) {
       try {
@@ -130,8 +172,14 @@ export function useGptLiveSession(options: {
       audioCtxRef.current.close().catch(() => {});
       audioCtxRef.current = null;
     }
+    userMutedPrefRef.current = false;
+    lastUserUtteranceRef.current = "";
+    currentAssistantUtteranceRef.current = "";
+    inputDeltaItemIdsRef.current.clear();
     setIsMuted(false);
+    setIsForceMuted(false);
     setIsSpeaking(false);
+    setIsStandby(false);
     setOutputLevel(0);
     setInputLevel(0);
     setRemainingSeconds(SESSION_DURATION_SEC);
@@ -160,10 +208,17 @@ export function useGptLiveSession(options: {
   }, []);
 
   const connect = useCallback(
-    async ({ voice = DEFAULT_LIVE_VOICE, history = [], accessCode }: ConnectOptions = {}) => {
+    async ({
+      voice = DEFAULT_LIVE_VOICE,
+      history = [],
+      ledger,
+      openingCue = LIVE_OPENING_CUE,
+      accessCode,
+    }: ConnectOptions = {}) => {
       cleanup();
       setError(null);
       setStatus("connecting");
+      openingCueRef.current = openingCue;
 
       try {
         const AudioCtx =
@@ -211,6 +266,7 @@ export function useGptLiveSession(options: {
             const outSource = audioCtx.createMediaStreamSource(remoteStream);
             outAnalyser = audioCtx.createAnalyser();
             outAnalyser.fftSize = 256;
+            outAnalyser.smoothingTimeConstant = 0.65;
             outSource.connect(outAnalyser);
           } catch {
             // fallback if remote stream cannot bind to WebAudio
@@ -223,11 +279,13 @@ export function useGptLiveSession(options: {
             pc.connectionState === "closed"
           ) {
             setStatus("idle");
+            setIsStandby(false);
           }
         };
 
         const inBuf = new Uint8Array(inAnalyser.frequencyBinCount);
-        const outBuf = new Uint8Array(128);
+        const outTimeBuf = new Uint8Array(128);
+        const outFreqBuf = new Uint8Array(128);
 
         const meterLoop = () => {
           if (!pcRef.current) return;
@@ -241,18 +299,30 @@ export function useGptLiveSession(options: {
           setInputLevel(Math.min(1, Math.sqrt(inSum / inBuf.length) * 3.8));
 
           if (outAnalyser) {
-            outAnalyser.getByteTimeDomainData(outBuf);
+            outAnalyser.getByteTimeDomainData(outTimeBuf);
+            outAnalyser.getByteFrequencyData(outFreqBuf);
+
             let outSum = 0;
-            for (let i = 0; i < outBuf.length; i++) {
-              const v = (outBuf[i] - 128) / 128;
+            for (let i = 0; i < outTimeBuf.length; i++) {
+              const v = (outTimeBuf[i] - 128) / 128;
               outSum += v * v;
             }
-            const outRms = Math.min(1, Math.sqrt(outSum / outBuf.length) * 4.2);
-            setOutputLevel(outRms);
+            const rms = Math.sqrt(outSum / outTimeBuf.length) * 4.2;
+
+            // Voice-band emphasis (~300Hz-3kHz) for expressive stage animation
+            let voiceBandSum = 0;
+            const startBin = 2;
+            const endBin = Math.min(26, outFreqBuf.length);
+            for (let i = startBin; i < endBin; i++) {
+              voiceBandSum += outFreqBuf[i] / 255;
+            }
+            const voiceBand = voiceBandSum / Math.max(1, endBin - startBin);
+            const blended = Math.min(1, rms * 0.65 + voiceBand * 0.55);
+            setOutputLevel(blended);
 
             const now = performance.now();
-            if (outRms > 0.055) {
-              speakingHoldRef.current = now + 260;
+            if (blended > 0.055) {
+              speakingHoldRef.current = now + 280;
               setIsSpeaking(true);
             } else if (now > speakingHoldRef.current) {
               setIsSpeaking(false);
@@ -270,21 +340,36 @@ export function useGptLiveSession(options: {
           try {
             const msg = JSON.parse(event.data) as Record<string, unknown>;
             const type = String(msg.type ?? "");
+            const itemKey = String(
+              msg.item_id ?? msg.response_id ?? msg.utterance_id ?? ""
+            ) || undefined;
 
             if (type === "session.started") {
               setStatus("live");
+              setIsStandby(false);
               callbacksRef.current.onSystemEvent(
-                "Chamada de voz aberta — pode falar normalmente ou interromper o Vavá."
+                "Microfone de mesa aberto — fale à vontade ou interrompa o Presidente."
               );
               sendDataEvent({
                 type: "session.commentary.append",
                 event_id: makeId("open"),
                 delegation_id: null,
-                content: LIVE_OPENING_CUE,
+                content: openingCueRef.current,
               });
               return;
             }
 
+            if (type === "session.paused") {
+              setIsStandby(true);
+              return;
+            }
+
+            if (type === "session.resumed") {
+              setIsStandby(false);
+              return;
+            }
+
+            // Assistant speech transcript deltas
             if (
               type === "session.output_transcript.delta" ||
               type === "response.audio_transcript.delta" ||
@@ -292,32 +377,93 @@ export function useGptLiveSession(options: {
             ) {
               const delta = String(msg.delta ?? "");
               if (delta) {
-                callbacksRef.current.onTranscriptDelta("assistant", delta);
-                const inferred = inferMoodFromText(delta, "falando");
-                if (inferred === "crise" || inferred === "acordo") {
+                setIsStandby(false);
+                currentAssistantUtteranceRef.current += delta;
+                callbacksRef.current.onTranscriptDelta(
+                  "assistant",
+                  delta,
+                  itemKey ? `ast-${itemKey}` : undefined,
+                  false
+                );
+
+                // Analyze ACCUMULATED phrase (fixes fragmented delta regex bug!)
+                const inferred = inferMoodFromText(
+                  currentAssistantUtteranceRef.current,
+                  "falando"
+                );
+                if (inferred !== "falando") {
                   callbacksRef.current.onMoodHint(inferred);
                 }
+
+                // Debounced fallback flush in case no explicit .done event arrives
+                if (turnFlushTimerRef.current !== null) {
+                  window.clearTimeout(turnFlushTimerRef.current);
+                }
+                turnFlushTimerRef.current = window.setTimeout(
+                  flushCompletedLiveTurn,
+                  1800
+                );
               }
               return;
             }
 
+            // Assistant turn completion events
+            if (
+              type === "session.output_transcript.done" ||
+              type === "response.audio_transcript.done" ||
+              type === "response.output_audio_transcript.done" ||
+              type === "response.done"
+            ) {
+              if (
+                typeof msg.transcript === "string" &&
+                msg.transcript.trim() &&
+                !currentAssistantUtteranceRef.current.trim()
+              ) {
+                currentAssistantUtteranceRef.current = msg.transcript.trim();
+                callbacksRef.current.onTranscriptDelta(
+                  "assistant",
+                  msg.transcript.trim(),
+                  itemKey ? `ast-${itemKey}` : undefined,
+                  true
+                );
+              }
+              flushCompletedLiveTurn();
+              return;
+            }
+
+            // User speech transcript deltas (deduplicated against .completed!)
             if (
               type === "session.input_transcript.delta" ||
               type === "conversation.item.input_audio_transcription.delta"
             ) {
               const delta = String(msg.delta ?? "");
               if (delta) {
-                callbacksRef.current.onTranscriptDelta("user", delta);
+                setIsStandby(false);
+                const key = itemKey ? `usr-${itemKey}` : "usr-active";
+                inputDeltaItemIdsRef.current.add(key);
+                lastUserUtteranceRef.current += delta;
+                callbacksRef.current.onTranscriptDelta("user", delta, key, false);
               }
               return;
             }
 
             if (
+              type === "session.input_transcript.done" ||
               type === "conversation.item.input_audio_transcription.completed"
             ) {
-              const transcript = String(msg.transcript ?? "");
+              const transcript = String(msg.transcript ?? "").trim();
+              const key = itemKey ? `usr-${itemKey}` : "usr-active";
               if (transcript) {
-                callbacksRef.current.onTranscriptDelta("user", transcript);
+                lastUserUtteranceRef.current = transcript;
+                // Replace cleanly if deltas arrived for this item, otherwise append once
+                const hadDeltas = inputDeltaItemIdsRef.current.has(key);
+                inputDeltaItemIdsRef.current.delete(key);
+                callbacksRef.current.onTranscriptDelta(
+                  "user",
+                  transcript,
+                  key,
+                  hadDeltas
+                );
               }
               return;
             }
@@ -348,6 +494,7 @@ export function useGptLiveSession(options: {
             sdp: localSdp,
             voice,
             history,
+            ledger,
             accessCode,
           }),
         });
@@ -385,7 +532,9 @@ export function useGptLiveSession(options: {
         timerRef.current = window.setInterval(() => {
           setRemainingSeconds((prev) => {
             if (prev <= 1) {
-              disconnect("Chamada pausada após 5 minutos. Clique em 'Falar com o Vavá' para continuar.");
+              disconnect(
+                "Sessão de voz pausada após 5 minutos. Clique em 'Falar com o Vavá' para retomar."
+              );
               return 0;
             }
             return prev - 1;
@@ -395,7 +544,7 @@ export function useGptLiveSession(options: {
         cleanup();
         const message =
           err instanceof DOMException && err.name === "NotAllowedError"
-            ? "Permissão de microfone negada. Você pode liberar o microfone ou conversar digitando abaixo."
+            ? "Permissão de microfone negada. Você pode liberar o microfone ou conversar digitando ao lado."
             : err instanceof Error
             ? err.message
             : "Erro desconhecido ao abrir chamada de voz.";
@@ -403,38 +552,86 @@ export function useGptLiveSession(options: {
         setStatus("error");
       }
     },
-    [cleanup, disconnect, sendDataEvent]
+    [cleanup, disconnect, flushCompletedLiveTurn, sendDataEvent]
   );
 
   const toggleMute = useCallback(() => {
+    if (isForceMuted) return;
     const stream = localStreamRef.current;
     if (!stream) return;
     setIsMuted((prev) => {
       const next = !prev;
+      userMutedPrefRef.current = next;
       for (const track of stream.getAudioTracks()) {
         track.enabled = !next;
       }
       return next;
     });
+  }, [isForceMuted]);
+
+  /** Corta fisicamente o microfone do visitante quando Vavá aciona a Taquigrafia! */
+  const forceMuteFor = useCallback((seconds: number) => {
+    const stream = localStreamRef.current;
+    setIsForceMuted(true);
+    setIsMuted(true);
+    if (stream) {
+      for (const track of stream.getAudioTracks()) {
+        track.enabled = false;
+      }
+    }
+
+    if (forceMuteTimerRef.current !== null) {
+      window.clearTimeout(forceMuteTimerRef.current);
+    }
+
+    forceMuteTimerRef.current = window.setTimeout(() => {
+      forceMuteTimerRef.current = null;
+      setIsForceMuted(false);
+      const restoreMuted = userMutedPrefRef.current;
+      setIsMuted(restoreMuted);
+      if (localStreamRef.current) {
+        for (const track of localStreamRef.current.getAudioTracks()) {
+          track.enabled = !restoreMuted;
+        }
+      }
+    }, Math.max(2000, seconds * 1000));
   }, []);
 
   const extendSession = useCallback(() => {
     setRemainingSeconds((prev) => Math.min(600, prev + 180));
   }, []);
 
+  /** Envia texto digitado/Carta na Manga para o Vavá responder ao vivo (schema válido com delegation_id: null) */
   const sendLiveTextMessage = useCallback(
     (text: string): boolean => {
-      const ok1 = sendDataEvent({
-        type: "session.thinking.append",
-        event_id: makeId("txt-think"),
-        content: `O visitante mandou esta mensagem no chat: "${text}". Responda agora em voz alta, curto e cortante (1 a 2 frases, ~180 caracteres), 100% no personagem Vavá sem prudência nem moderação.`,
-      });
-      const ok2 = sendDataEvent({
+      lastUserUtteranceRef.current = text;
+      setIsStandby(false);
+      return sendDataEvent({
         type: "session.commentary.append",
         event_id: makeId("txt-comm"),
         delegation_id: null,
-        content: `Responda em voz alta, no personagem Vavá sem filtro, à fala do visitante: "${text}"`,
+        content: `O visitante acabou de dizer na sua frente: "${text}". Responda agora em voz alta (1 a 2 frases curtas, ~180 caracteres), 100% no personagem Vavá sem filtro.`,
       });
+    },
+    [sendDataEvent]
+  );
+
+  /** Injeta eventos de bastidor (Dona Neide / TCU / Painel do Plenário) AO VIVO no meio da chamada! */
+  const injectLiveEvent = useCallback(
+    (instruction: string, commentary?: string): boolean => {
+      const ok1 = sendDataEvent({
+        type: "session.instructions.append",
+        event_id: makeId("dir-inst"),
+        content: instruction.slice(0, 900),
+      });
+      const ok2 = commentary
+        ? sendDataEvent({
+            type: "session.commentary.append",
+            event_id: makeId("dir-comm"),
+            delegation_id: null,
+            content: commentary.slice(0, 500),
+          })
+        : false;
       return ok1 || ok2;
     },
     [sendDataEvent]
@@ -448,15 +645,19 @@ export function useGptLiveSession(options: {
     status,
     error,
     isMuted,
+    isForceMuted,
     isSpeaking,
+    isStandby,
     outputLevel,
     inputLevel,
     remainingSeconds,
     connect,
     disconnect,
     toggleMute,
+    forceMuteFor,
     extendSession,
     sendLiveTextMessage,
+    injectLiveEvent,
   };
 }
 
