@@ -120,6 +120,15 @@ export function ScenarioDrawer({
             >
               Gab. 222 · Dep. Clarice (Costumes) <ExternalLink size={11} />
             </a>
+            <a
+              href="https://plenariocaotico.pages.dev"
+              target="_blank"
+              rel="noreferrer"
+              className="trinca-pill"
+              style={{ borderColor: "rgba(212, 164, 70, 0.7)", fontWeight: 700 }}
+            >
+              🏛️ Plenário Caótico · Debate dos 3 ao Vivo <ExternalLink size={11} />
+            </a>
           </div>
         </div>
       </div>
