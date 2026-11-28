@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Copy, Download, ExternalLink, FileText, RotateCcw, X } from "lucide-react";
 import {
   classifyVisitorArchetype,
@@ -11,6 +11,7 @@ import {
   generateDossierCard,
   shareImageNativeOrCopy,
 } from "../utils/shareCardGenerator";
+import { useModalBehavior } from "../hooks/useModalBehavior";
 
 interface SessionSummaryModalProps {
   open: boolean;
@@ -29,6 +30,28 @@ export function SessionSummaryModal({
 }: SessionSummaryModalProps) {
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const statusTimerRef = useRef<number | null>(null);
+
+  useModalBehavior(open, onClose);
+
+  useEffect(() => {
+    if (open) {
+      setStatusMsg(null);
+      setBusy(false);
+      if (statusTimerRef.current !== null) {
+        window.clearTimeout(statusTimerRef.current);
+        statusTimerRef.current = null;
+      }
+    }
+  }, [open]);
+
+  useEffect(() => {
+    return () => {
+      if (statusTimerRef.current !== null) {
+        window.clearTimeout(statusTimerRef.current);
+      }
+    };
+  }, []);
 
   if (!open) return null;
 
@@ -39,6 +62,16 @@ export function SessionSummaryModal({
       ? ledger.endedTitle
       : "Resumo da Audiência";
 
+  const scheduleStatusClear = () => {
+    if (statusTimerRef.current !== null) {
+      window.clearTimeout(statusTimerRef.current);
+    }
+    statusTimerRef.current = window.setTimeout(() => {
+      statusTimerRef.current = null;
+      setStatusMsg(null);
+    }, 2600);
+  };
+
   const handleShare = async (mode: "copy" | "download") => {
     setBusy(true);
     try {
@@ -47,6 +80,7 @@ export function SessionSummaryModal({
       if (mode === "download") {
         downloadBlob(blob, filename);
         setStatusMsg("Ata PNG salva!");
+        scheduleStatusClear();
       } else {
         const res = await shareImageNativeOrCopy(
           blob,
@@ -54,6 +88,9 @@ export function SessionSummaryModal({
           `Ata do Gabinete do Vavá — ${arch.title}`,
           `Saí do Gabinete 412 como "${arch.title}"! Testa lá: https://gabinetedovava.pages.dev`
         );
+        if (res === "cancelled") {
+          return;
+        }
         setStatusMsg(
           res === "shared"
             ? "Ata compartilhada!"
@@ -61,8 +98,11 @@ export function SessionSummaryModal({
             ? "Card copiado! Cole no WhatsApp."
             : "Ata PNG salva!"
         );
+        scheduleStatusClear();
       }
-      window.setTimeout(() => setStatusMsg(null), 2600);
+    } catch {
+      setStatusMsg("Erro ao gerar PNG.");
+      scheduleStatusClear();
     } finally {
       setBusy(false);
     }
@@ -189,7 +229,7 @@ export function SessionSummaryModal({
         </div>
 
         <div className="trinca-bar">
-          <span className="trinca-label">VISITE OS VIZINHOS DA TRINCA CAÓTICA</span>
+          <span className="trinca-label">QUARTETO CAÓTICO DA CÂMARA</span>
           <div className="trinca-links">
             <a
               href="https://gabinetedobento.pages.dev"
@@ -197,7 +237,7 @@ export function SessionSummaryModal({
               rel="noreferrer"
               className="trinca-pill"
             >
-              Gab. 717 · Prof. Bento <ExternalLink size={11} />
+              Gab. 717 · Prof. Bento (Minoria · Anexo II) <ExternalLink size={11} />
             </a>
             <a
               href="https://gabinetedaclarice.pages.dev"
@@ -205,7 +245,15 @@ export function SessionSummaryModal({
               rel="noreferrer"
               className="trinca-pill"
             >
-              Gab. 222 · Dep. Clarice <ExternalLink size={11} />
+              Gab. 222 · Dep. Clarice (Costumes) <ExternalLink size={11} />
+            </a>
+            <a
+              href="https://plenariocaotico.pages.dev"
+              target="_blank"
+              rel="noreferrer"
+              className="trinca-pill is-plenario"
+            >
+              🏛️ Plenário Caótico · Debate dos 4 ao Vivo <ExternalLink size={11} />
             </a>
           </div>
         </div>

@@ -1,8 +1,8 @@
-import { timingSafeEqual } from "node:crypto";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import {
   DIRECTOR_RESPONSE_SCHEMA,
   DEFAULT_LIVE_VOICE,
+  FALLBACK_LIVE_VOICE,
   buildDirectorInstructions,
   buildLiveInstructions,
   buildTextInstructions,
@@ -11,15 +11,26 @@ import {
 } from "../src/shared/persona";
 import {
   clamp,
+  isDocumentAction,
   sanitizeDirectorPatch,
+  type CabinetDocument,
   type DirectorPatch,
   type ScenarioId,
   type SessionLedger,
 } from "../src/shared/gameState";
 import { SCENARIOS, createInitialLedger } from "../src/shared/scenarios";
 
-const app = new Hono<{ Bindings: Env }>();
+type AppEnv = {
+  Bindings: Env;
+  Variables: {
+    rawBodyText?: string;
+  };
+};
 
+const app = new Hono<AppEnv>();
+
+const MAX_API_BODY_BYTES = 32 * 1024;
+const MAX_SDP_LENGTH = 24_000;
 const PRESET_LIVE_VOICES = new Set(["tempo", "bossa", "stone", "ripple"]);
 const CUSTOM_VOICE_ID_RE = /^voice_[a-zA-Z0-9_-]{8,80}$/;
 
@@ -29,11 +40,145 @@ export function resetRateLimitStore(): void {
   rateLimitStore.clear();
 }
 
+function stripControlAndNewlines(value: string): string {
+  return value
+    .replace(/[\r\n\u0000-\u001F\u007F]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function stripControlCharsKeepNewlines(value: string): string {
+  return value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]+/g, "").trim();
+}
+
+async function readBodyWithinLimit(
+  request: Request,
+  maxBytes: number
+): Promise<{ ok: true; text: string } | { ok: false }> {
+  const body = request.body;
+  if (!body) {
+    return { ok: true, text: "" };
+  }
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        return { ok: false };
+      }
+      chunks.push(value);
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // ignore
+    }
+  }
+
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { ok: true, text: new TextDecoder().decode(merged) };
+}
+
+function parseJsonObjectBody<T extends Record<string, unknown>>(
+  c: Context<AppEnv>
+): T | null {
+  const raw = c.get("rawBodyText") ?? "";
+  if (!raw.trim()) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed as T;
+  } catch {
+    return null;
+  }
+}
+
+// Global security headers + API Cache-Control
+app.use("*", async (c, next) => {
+  await next();
+  const headers = new Headers(c.res.headers);
+  headers.set("X-Content-Type-Options", "nosniff");
+  headers.set("X-Frame-Options", "DENY");
+  headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+  headers.set(
+    "Permissions-Policy",
+    "camera=(), geolocation=(), microphone=(self)"
+  );
+  if (c.req.path.startsWith("/api/")) {
+    headers.set("Cache-Control", "no-store");
+  }
+  c.res = new Response(c.res.body, {
+    status: c.res.status,
+    statusText: c.res.statusText,
+    headers,
+  });
+});
+
+// Strict POST /api/* origin, content-type, and 32KB body cap middleware
+app.use("/api/*", async (c, next) => {
+  if (c.req.method === "POST") {
+    const origin = c.req.header("Origin");
+    if (origin) {
+      let reqOrigin = "";
+      try {
+        reqOrigin = new URL(c.req.url).origin;
+      } catch {
+        reqOrigin = "";
+      }
+      if (origin !== reqOrigin) {
+        return c.json({ error: "Origem não autorizada." }, 403);
+      }
+    }
+
+    const contentType = c.req.header("Content-Type") || "";
+    if (!contentType.toLowerCase().startsWith("application/json")) {
+      return c.json(
+        { error: "Content-Type deve ser application/json." },
+        415
+      );
+    }
+
+    const contentLength = c.req.header("Content-Length");
+    if (contentLength) {
+      const declaredBytes = Number(contentLength);
+      if (Number.isFinite(declaredBytes) && declaredBytes > MAX_API_BODY_BYTES) {
+        return c.json(
+          { error: "Payload excede o limite máximo de 32KB." },
+          413
+        );
+      }
+    }
+
+    const bodyResult = await readBodyWithinLimit(c.req.raw, MAX_API_BODY_BYTES);
+    if (!bodyResult.ok) {
+      return c.json(
+        { error: "Payload excede o limite máximo de 32KB." },
+        413
+      );
+    }
+    c.set("rawBodyText", bodyResult.text);
+  }
+  await next();
+});
+
 function getClientKey(request: Request, bucket: string): string {
-  const ip =
-    request.headers.get("CF-Connecting-IP") ||
-    request.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() ||
-    "local";
+  const ip = request.headers.get("CF-Connecting-IP")?.trim() || "local";
   return `${bucket}:${ip}`;
 }
 
@@ -48,10 +193,16 @@ function checkRateLimit(
   const existing = rateLimitStore.get(key);
 
   if (!existing || now >= existing.resetAt) {
+    rateLimitStore.delete(key);
     rateLimitStore.set(key, { count: 1, resetAt: now + windowMs });
     if (rateLimitStore.size > 2000) {
       for (const [k, v] of rateLimitStore.entries()) {
         if (now >= v.resetAt) rateLimitStore.delete(k);
+      }
+      while (rateLimitStore.size > 2000) {
+        const oldestKey = rateLimitStore.keys().next().value;
+        if (oldestKey === undefined) break;
+        rateLimitStore.delete(oldestKey);
       }
     }
     return { allowed: true, retryAfterSec: 0 };
@@ -86,32 +237,61 @@ export function formatLiveVoiceParam(voice: string): string | { id: string } {
   return CUSTOM_VOICE_ID_RE.test(voice) ? { id: voice } : voice;
 }
 
-async function sha256Bytes(input: string): Promise<Uint8Array> {
+async function sha256Bytes(input: string): Promise<Uint8Array<ArrayBuffer>> {
   const data = new TextEncoder().encode(input);
   const digest = await crypto.subtle.digest("SHA-256", data);
   return new Uint8Array(digest);
+}
+
+function constantTimeEqual(
+  a: Uint8Array<ArrayBuffer>,
+  b: Uint8Array<ArrayBuffer>
+): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  const subtle = crypto.subtle as SubtleCrypto & {
+    timingSafeEqual?: (left: BufferSource, right: BufferSource) => boolean;
+  };
+  if (typeof subtle.timingSafeEqual === "function") {
+    return subtle.timingSafeEqual(a, b);
+  }
+  let diff = 0;
+  for (let i = 0; i < a.byteLength; i++) {
+    diff |= a[i] ^ b[i];
+  }
+  return diff === 0;
 }
 
 async function verifyAccessCode(
   provided: unknown,
   expected: string | undefined
 ): Promise<boolean> {
-  if (!expected || expected.trim() === "") {
+  const trimmedExpected = expected?.trim() ?? "";
+  if (trimmedExpected === "") {
     return true;
   }
-  if (typeof provided !== "string" || provided.length === 0) {
+  if (typeof provided !== "string") {
+    return false;
+  }
+  const trimmedProvided = provided.trim();
+  if (trimmedProvided.length === 0) {
     return false;
   }
   const [a, b] = await Promise.all([
-    sha256Bytes(provided),
-    sha256Bytes(expected),
+    sha256Bytes(trimmedProvided),
+    sha256Bytes(trimmedExpected),
   ]);
-  return timingSafeEqual(a, b);
+  return constantTimeEqual(a, b);
 }
 
-function sanitizeHistory(input: unknown, limit = 16): RecentTurn[] {
+function sanitizeHistory(
+  input: unknown,
+  limit = 16,
+  singleLine = false
+): RecentTurn[] {
   if (!Array.isArray(input)) return [];
+  const preSliceCount = Math.max(limit * 2, 24);
   return input
+    .slice(-preSliceCount)
     .filter(
       (item): item is RecentTurn =>
         typeof item === "object" &&
@@ -124,8 +304,41 @@ function sanitizeHistory(input: unknown, limit = 16): RecentTurn[] {
     .slice(-limit)
     .map((item) => ({
       role: item.role,
-      content: item.content.slice(0, 1500),
-    }));
+      content: (singleLine
+        ? stripControlAndNewlines(item.content)
+        : stripControlCharsKeepNewlines(item.content)
+      ).slice(0, 1500),
+    }))
+    .filter((item) => item.content.length > 0);
+}
+
+function sanitizeDocumentsInput(input: unknown): CabinetDocument[] {
+  if (!Array.isArray(input)) return [];
+  const docs: CabinetDocument[] = [];
+  for (const rawItem of input.slice(-12)) {
+    if (typeof rawItem !== "object" || rawItem === null) continue;
+    const item = rawItem as Record<string, unknown>;
+    const cleanPatch = sanitizeDirectorPatch({ action: item.action });
+    if (!isDocumentAction(cleanPatch.action)) continue;
+
+    const id =
+      typeof item.id === "string" && item.id.trim().length > 0
+        ? stripControlAndNewlines(item.id).slice(0, 48)
+        : `doc-${docs.length + 1}`;
+    const createdAt =
+      typeof item.createdAt === "string" && item.createdAt.trim().length > 0
+        ? stripControlAndNewlines(item.createdAt).slice(0, 24)
+        : "";
+    const turn = clamp(Math.round(Number(item.turn) || 1), 1, 200);
+
+    docs.push({
+      id,
+      createdAt,
+      turn,
+      action: cleanPatch.action,
+    });
+  }
+  return docs;
 }
 
 function sanitizeLedgerInput(input: unknown): SessionLedger | undefined {
@@ -188,19 +401,21 @@ function sanitizeLedgerInput(input: unknown): SessionLedger | undefined {
     },
     facts: Array.isArray(raw.facts)
       ? raw.facts
+          .slice(-24)
           .filter((f): f is string => typeof f === "string" && f.trim().length > 0)
           .slice(-10)
-          .map((f) => f.slice(0, 140))
+          .map((f) => stripControlAndNewlines(f).slice(0, 140))
+          .filter(Boolean)
       : [],
     recentTropes: Array.isArray(raw.recentTropes)
       ? raw.recentTropes
+          .slice(-20)
           .filter((t): t is string => typeof t === "string" && t.trim().length > 0)
           .slice(-8)
-          .map((t) => t.slice(0, 48))
+          .map((t) => stripControlAndNewlines(t).slice(0, 48))
+          .filter(Boolean)
       : [],
-    documents: Array.isArray(raw.documents)
-      ? (raw.documents.slice(-12) as SessionLedger["documents"])
-      : [],
+    documents: sanitizeDocumentsInput(raw.documents),
   };
 }
 
@@ -277,7 +492,7 @@ export function buildFallbackDirectorPatch(
       salarioMensal: "R$ 18.420,00",
       justificativa: "Acomodação estratégica de lideranças do gabinete.",
     };
-  } else if (/(carimb|emenda|milhões|asfalto|rodeio|viaduto)/.test(assistantReply.toLowerCase()) && /(voto|acordo|composi|consenso|prefeito|base)/.test(combined)) {
+  } else if (/(carimb|emenda|milhões|asfalto|rodeio|viaduto)/.test(assistantReply.toLowerCase()) && /(voto|\bacordo\b|composi|consenso|prefeito|base)/.test(combined)) {
     meterDelta.apoioBase = 10;
     meterDelta.verbaMilhoes = 4;
     meterDelta.riscoCpi = 6;
@@ -286,7 +501,7 @@ export function buildFallbackDirectorPatch(
       valorMilhoes: 4,
       destino: "Asfalto Eleitoreiro & Rodeio Regional",
       jabutiOculto: "Art. 19-C: Dispensa licitação para a construtora do cunhado com pedágio a cada 4 km.",
-      protocolo: `RP9-${Math.floor(1000 + Math.random() * 8999)}/2026`,
+      protocolo: `RP9-${Math.floor(1000 + Math.random() * 8999)}/${new Date().getFullYear()}`,
     };
   } else if (mood === "crise") {
     meterDelta.riscoCpi = 12;
@@ -303,7 +518,7 @@ export function buildFallbackDirectorPatch(
   if (/rodeio|sertanejo/.test(combined)) usedTropes.push("rodeio 4 milhões");
   if (/jabuti/.test(combined)) usedTropes.push("jabuti técnico");
   if (/cunhado/.test(combined)) usedTropes.push("empreiteira do cunhado");
-  if (/tcu|cpi/.test(combined)) usedTropes.push("tcu/cpi");
+  if (/\btcu\b|\bcpi\b/.test(combined)) usedTropes.push("tcu/cpi");
   if (/amante/.test(combined)) usedTropes.push("amante não é parente");
 
   return {
@@ -339,10 +554,8 @@ app.post("/api/auth/verify", async (c) => {
     );
   }
 
-  let body: { accessCode?: unknown };
-  try {
-    body = await c.req.json();
-  } catch {
+  const body = parseJsonObjectBody<{ accessCode?: unknown }>(c);
+  if (!body) {
     return c.json({ error: "Payload JSON inválido." }, 400);
   }
 
@@ -366,17 +579,14 @@ app.post("/api/live/session", async (c) => {
     );
   }
 
-  let body: {
+  const body = parseJsonObjectBody<{
     sdp?: unknown;
     voice?: unknown;
     history?: unknown;
     ledger?: unknown;
     accessCode?: unknown;
-  };
-
-  try {
-    body = await c.req.json();
-  } catch {
+  }>(c);
+  if (!body) {
     return c.json({ error: "Payload JSON inválido." }, 400);
   }
 
@@ -388,7 +598,11 @@ app.post("/api/live/session", async (c) => {
     return c.json({ error: "Senha de gabinete inválida." }, 401);
   }
 
-  if (typeof body.sdp !== "string" || !body.sdp.includes("v=0")) {
+  if (
+    typeof body.sdp !== "string" ||
+    body.sdp.length > MAX_SDP_LENGTH ||
+    !body.sdp.includes("v=0")
+  ) {
     return c.json(
       { error: "SDP offer WebRTC ausente ou inválido." },
       400
@@ -400,14 +614,17 @@ app.post("/api/live/session", async (c) => {
       JSON.stringify({ event: "missing_openai_key", path: "/api/live/session" })
     );
     return c.json(
-      { error: "OPENAI_API_KEY não configurada no servidor." },
+      { error: "Serviço de voz indisponível no momento." },
       500
     );
   }
 
-  const voice = parseLiveVoice(body.voice, c.env.DEFAULT_VOICE || DEFAULT_LIVE_VOICE);
+  const requestedVoice = parseLiveVoice(
+    body.voice,
+    c.env.DEFAULT_VOICE || DEFAULT_LIVE_VOICE
+  );
   const model = c.env.GPT_LIVE_MODEL || "gpt-live-1.1";
-  const recentHistory = sanitizeHistory(body.history, 8);
+  const recentHistory = sanitizeHistory(body.history, 8, true);
   const ledger = sanitizeLedgerInput(body.ledger);
   const instructions = buildLiveInstructions(recentHistory, ledger);
 
@@ -415,19 +632,22 @@ app.post("/api/live/session", async (c) => {
     JSON.stringify({
       event: "live_session_create_start",
       model,
-      voice,
+      voice: requestedVoice,
       recentTurns: recentHistory.length,
       scenarioId: ledger?.scenarioId ?? "livre",
     })
   );
 
-  const createUpstreamSession = async (withStandby: boolean) => {
+  const createUpstreamSession = async (
+    withStandby: boolean,
+    selectedVoice: string
+  ) => {
     const sessionConfig: Record<string, unknown> = {
       model,
       instructions,
       audio: {
         output: {
-          voice: formatLiveVoiceParam(voice),
+          voice: formatLiveVoiceParam(selectedVoice),
         },
       },
     };
@@ -449,13 +669,16 @@ app.post("/api/live/session", async (c) => {
           sdp: body.sdp,
         },
       }),
+      signal: AbortSignal.timeout(20_000),
     });
   };
 
   try {
-    let upstream = await createUpstreamSession(true);
-    let rawText = await upstream.text();
+    let effectiveVoice = requestedVoice;
     let standbyEnabled = true;
+
+    let upstream = await createUpstreamSession(true, effectiveVoice);
+    let rawText = await upstream.text();
 
     // Graceful fallback if standby fields are rejected by a different live model
     if (!upstream.ok && (upstream.status === 400 || upstream.status === 422)) {
@@ -467,7 +690,27 @@ app.post("/api/live/session", async (c) => {
         })
       );
       standbyEnabled = false;
-      upstream = await createUpstreamSession(false);
+      upstream = await createUpstreamSession(false, effectiveVoice);
+      rawText = await upstream.text();
+    }
+
+    // Fallback to preset voice if custom voice ID is rejected
+    if (
+      !upstream.ok &&
+      (upstream.status === 400 || upstream.status === 422) &&
+      CUSTOM_VOICE_ID_RE.test(effectiveVoice)
+    ) {
+      console.warn(
+        JSON.stringify({
+          event: "live_session_voice_fallback",
+          status: upstream.status,
+          failedVoice: effectiveVoice,
+          fallbackVoice: FALLBACK_LIVE_VOICE,
+          detail: rawText.slice(0, 260),
+        })
+      );
+      effectiveVoice = FALLBACK_LIVE_VOICE;
+      upstream = await createUpstreamSession(false, effectiveVoice);
       rawText = await upstream.text();
     }
 
@@ -477,19 +720,25 @@ app.post("/api/live/session", async (c) => {
           event: "live_session_upstream_error",
           status: upstream.status,
           model,
-          voice,
+          voice: effectiveVoice,
           detail: rawText.slice(0, 500),
         })
       );
+      if (upstream.status === 429) {
+        return c.json(
+          {
+            error:
+              "Linha do gabinete congestionada no momento. Aguarde alguns segundos e tente novamente.",
+          },
+          429
+        );
+      }
       return c.json(
         {
-          error: "Falha ao inicializar conversa por voz com a OpenAI.",
-          status: upstream.status,
-          detail: rawText.slice(0, 400),
+          error:
+            "Não foi possível inicializar a chamada de voz com o gabinete agora. Tente novamente em instantes.",
         },
-        upstream.status >= 400 && upstream.status < 600
-          ? (upstream.status as 400 | 401 | 403 | 422 | 429 | 500 | 502 | 503)
-          : 502
+        502
       );
     }
 
@@ -503,7 +752,7 @@ app.post("/api/live/session", async (c) => {
         event: "live_session_created",
         sessionId: data.session?.id ?? "unknown",
         model,
-        voice,
+        voice: effectiveVoice,
         standbyEnabled,
       })
     );
@@ -513,7 +762,7 @@ app.post("/api/live/session", async (c) => {
         session: data.session,
         transport: data.transport,
         model,
-        voice,
+        voice: effectiveVoice,
         standbyEnabled,
       },
       201
@@ -545,17 +794,14 @@ app.post("/api/chat", async (c) => {
     );
   }
 
-  let body: {
+  const body = parseJsonObjectBody<{
     message?: unknown;
     history?: unknown;
     ledger?: unknown;
     stream?: unknown;
     accessCode?: unknown;
-  };
-
-  try {
-    body = await c.req.json();
-  } catch {
+  }>(c);
+  if (!body) {
     return c.json({ error: "Payload JSON inválido." }, 400);
   }
 
@@ -569,16 +815,22 @@ app.post("/api/chat", async (c) => {
   }
 
   if (!c.env.OPENAI_API_KEY) {
+    console.error(
+      JSON.stringify({ event: "missing_openai_key", path: "/api/chat" })
+    );
     return c.json(
-      { error: "OPENAI_API_KEY não configurada no servidor." },
+      { error: "Serviço de atendimento indisponível no momento." },
       500
     );
   }
 
   const model = c.env.OPENAI_TEXT_MODEL || "gpt-6-luna";
-  const history = sanitizeHistory(body.history, 16);
+  const history = sanitizeHistory(body.history, 16, false);
   const ledger = sanitizeLedgerInput(body.ledger);
-  const userMessage = body.message.trim().slice(0, 1500);
+  const userMessage = stripControlCharsKeepNewlines(body.message).slice(0, 1500);
+  if (!userMessage) {
+    return c.json({ error: "Mensagem vazia." }, 400);
+  }
   const wantStream = body.stream === true;
 
   const inputMessages = [
@@ -602,6 +854,11 @@ app.post("/api/chat", async (c) => {
     })
   );
 
+  const upstreamAbort = new AbortController();
+  const onClientAbort = () => upstreamAbort.abort();
+  c.req.raw.signal.addEventListener("abort", onClientAbort, { once: true });
+  const connectTimeout = setTimeout(() => upstreamAbort.abort(), 30_000);
+
   try {
     const upstream = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
@@ -616,9 +873,12 @@ app.post("/api/chat", async (c) => {
         max_output_tokens: 700,
         ...(wantStream ? { stream: true } : {}),
       }),
+      signal: upstreamAbort.signal,
     });
+    clearTimeout(connectTimeout);
 
     if (!upstream.ok) {
+      c.req.raw.signal.removeEventListener("abort", onClientAbort);
       const rawText = await upstream.text();
       console.error(
         JSON.stringify({
@@ -627,10 +887,18 @@ app.post("/api/chat", async (c) => {
           detail: rawText.slice(0, 400),
         })
       );
+      if (upstream.status === 429) {
+        return c.json(
+          {
+            error:
+              "O gabinete está muito movimentado agora. Aguarde alguns segundos e tente novamente.",
+          },
+          429
+        );
+      }
       return c.json(
         {
-          error: "Falha ao conversar com o Vavá.",
-          detail: rawText.slice(0, 300),
+          error: "Falha ao conversar com o Vavá agora. Tente novamente em instantes.",
         },
         502
       );
@@ -641,65 +909,140 @@ app.post("/api/chat", async (c) => {
       const decoder = new TextDecoder();
       const reader = upstream.body.getReader();
 
+      let closed = false;
+      let hadError = false;
+
       const sseStream = new ReadableStream({
         async start(controller) {
           let buffer = "";
           let fullReply = "";
 
           const emit = (event: string, data: Record<string, unknown>) => {
-            controller.enqueue(
-              encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
-            );
+            if (closed) return;
+            try {
+              controller.enqueue(
+                encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+              );
+            } catch {
+              closed = true;
+            }
+          };
+
+          const closeStream = () => {
+            if (closed) return;
+            closed = true;
+            try {
+              controller.close();
+            } catch {
+              // ignore already closed controller
+            }
+          };
+
+          const processLines = (lines: string[]) => {
+            for (const rawLine of lines) {
+              if (closed || hadError) break;
+              const line = rawLine.trim();
+              if (!line.startsWith("data:")) continue;
+              const payloadStr = line.slice(5).trim();
+              if (!payloadStr || payloadStr === "[DONE]") continue;
+
+              try {
+                const evt = JSON.parse(payloadStr) as Record<string, unknown>;
+                const evtType = String(evt.type ?? "");
+                if (
+                  evtType === "response.output_text.delta" &&
+                  typeof evt.delta === "string"
+                ) {
+                  fullReply += evt.delta;
+                  emit("delta", { delta: evt.delta });
+                } else if (
+                  evtType === "response.output_text.done" &&
+                  typeof evt.text === "string" &&
+                  !fullReply
+                ) {
+                  fullReply = evt.text;
+                  emit("delta", { delta: evt.text });
+                } else if (
+                  evtType === "response.failed" ||
+                  evtType === "error"
+                ) {
+                  console.error(
+                    JSON.stringify({
+                      event: "text_chat_stream_event_error",
+                      evtType,
+                      detail: JSON.stringify(evt).slice(0, 400),
+                    })
+                  );
+                  hadError = true;
+                  emit("error", {
+                    error:
+                      "Oscilação na linha do gabinete. Tente enviar novamente.",
+                  });
+                  break;
+                }
+              } catch {
+                // ignore non-JSON SSE chunks
+              }
+            }
           };
 
           try {
-            while (true) {
+            while (!closed && !hadError) {
               const { done, value } = await reader.read();
               if (done) break;
-              buffer += decoder.decode(value, { stream: true });
+              buffer = (buffer + decoder.decode(value, { stream: true }))
+                .replace(/\r\n/g, "\n")
+                .replace(/\r/g, "\n");
 
               const lines = buffer.split("\n");
               buffer = lines.pop() ?? "";
+              processLines(lines);
+            }
 
-              for (const rawLine of lines) {
-                const line = rawLine.trim();
-                if (!line.startsWith("data:")) continue;
-                const payloadStr = line.slice(5).trim();
-                if (!payloadStr || payloadStr === "[DONE]") continue;
-
-                try {
-                  const evt = JSON.parse(payloadStr) as Record<string, unknown>;
-                  const evtType = String(evt.type ?? "");
-                  if (
-                    evtType === "response.output_text.delta" &&
-                    typeof evt.delta === "string"
-                  ) {
-                    fullReply += evt.delta;
-                    emit("delta", { delta: evt.delta });
-                  } else if (
-                    evtType === "response.output_text.done" &&
-                    typeof evt.text === "string" &&
-                    !fullReply
-                  ) {
-                    fullReply = evt.text;
-                    emit("delta", { delta: evt.text });
-                  }
-                } catch {
-                  // ignore non-JSON SSE chunks
-                }
+            if (!closed && !hadError) {
+              buffer = (buffer + decoder.decode())
+                .replace(/\r\n/g, "\n")
+                .replace(/\r/g, "\n");
+              if (buffer.trim()) {
+                processLines(buffer.split("\n"));
               }
             }
           } catch (err) {
-            emit("error", {
-              error: err instanceof Error ? err.message : "Erro de streaming",
-            });
+            if (!closed && !upstreamAbort.signal.aborted) {
+              console.error(
+                JSON.stringify({
+                  event: "text_chat_stream_exception",
+                  error: err instanceof Error ? err.message : String(err),
+                })
+              );
+              hadError = true;
+              emit("error", {
+                error: "Oscilação na linha do gabinete. Tente novamente.",
+              });
+            }
           } finally {
-            const finalReply =
-              fullReply.trim() ||
-              "Veja bem, meu caro, deu uma oscilada no café aqui do gabinete. Pode repetir o que você disse?";
-            emit("done", { reply: finalReply, model });
-            controller.close();
+            c.req.raw.signal.removeEventListener("abort", onClientAbort);
+            if (hadError || closed || upstreamAbort.signal.aborted) {
+              await reader.cancel().catch(() => {});
+            } else {
+              const finalReply =
+                fullReply.trim() ||
+                "Veja bem, meu caro, deu uma oscilada no café aqui do gabinete. Pode repetir o que você disse?";
+              emit("done", { reply: finalReply, model });
+            }
+            try {
+              reader.releaseLock();
+            } catch {
+              // ignore
+            }
+            closeStream();
           }
+        },
+        cancel() {
+          closed = true;
+          c.req.raw.signal.removeEventListener("abort", onClientAbort);
+          upstreamAbort.abort();
+          reader.cancel().catch(() => {});
         },
       });
 
@@ -707,13 +1050,13 @@ app.post("/api/chat", async (c) => {
         status: 200,
         headers: {
           "Content-Type": "text/event-stream; charset=utf-8",
-          "Cache-Control": "no-cache, no-transform",
-          Connection: "keep-alive",
+          "Cache-Control": "no-store",
         },
       });
     }
 
     const rawText = await upstream.text();
+    c.req.raw.signal.removeEventListener("abort", onClientAbort);
     const parsed = JSON.parse(rawText) as Record<string, unknown>;
     const reply =
       extractResponseText(parsed) ||
@@ -724,6 +1067,8 @@ app.post("/api/chat", async (c) => {
       model,
     });
   } catch (err) {
+    clearTimeout(connectTimeout);
+    c.req.raw.signal.removeEventListener("abort", onClientAbort);
     console.error(
       JSON.stringify({
         event: "text_chat_exception",
@@ -744,16 +1089,13 @@ app.post("/api/director", async (c) => {
     return c.json({ error: "Diretor ocupado, aguarde alguns segundos." }, 429);
   }
 
-  let body: {
+  const body = parseJsonObjectBody<{
     userMessage?: unknown;
     assistantReply?: unknown;
     ledger?: unknown;
     accessCode?: unknown;
-  };
-
-  try {
-    body = await c.req.json();
-  } catch {
+  }>(c);
+  if (!body) {
     return c.json({ error: "Payload JSON inválido." }, 400);
   }
 
@@ -763,10 +1105,12 @@ app.post("/api/director", async (c) => {
   }
 
   const userMessage =
-    typeof body.userMessage === "string" ? body.userMessage.trim().slice(0, 800) : "";
+    typeof body.userMessage === "string"
+      ? stripControlAndNewlines(body.userMessage).slice(0, 800)
+      : "";
   const assistantReply =
     typeof body.assistantReply === "string"
-      ? body.assistantReply.trim().slice(0, 1200)
+      ? stripControlAndNewlines(body.assistantReply).slice(0, 1200)
       : "";
 
   if (!assistantReply) {
@@ -783,7 +1127,7 @@ app.post("/api/director", async (c) => {
   }
 
   const model =
-    (c.env as unknown as Record<string, string | undefined>).OPENAI_DIRECTOR_MODEL ||
+    c.env.OPENAI_DIRECTOR_MODEL ||
     c.env.OPENAI_TEXT_MODEL ||
     "gpt-6-luna";
 
@@ -817,15 +1161,18 @@ app.post("/api/director", async (c) => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(20_000),
     });
   };
 
   try {
     let upstream = await callDirector("minimal");
     if (!upstream.ok && (upstream.status === 400 || upstream.status === 422)) {
+      await upstream.body?.cancel();
       upstream = await callDirector("low");
     }
     if (!upstream.ok && (upstream.status === 400 || upstream.status === 422)) {
+      await upstream.body?.cancel();
       upstream = await callDirector(undefined);
     }
 

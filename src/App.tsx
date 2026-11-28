@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Radio } from "lucide-react";
 import { BroadcastHeader } from "./components/BroadcastHeader";
 import { CabinetMetersBar } from "./components/CabinetMetersBar";
 import { AvatarStage } from "./components/AvatarStage";
@@ -36,6 +37,16 @@ function createOpeningEntries(scenarioId: ScenarioId): ChatEntry[] {
   ];
 }
 
+function describeDocument(doc: CabinetDocument): string {
+  if (doc.action.type === "carimbar_emenda") {
+    return `Emenda carimbada (${doc.action.protocolo}): R$ ${doc.action.valorMilhoes}M — ${doc.action.destino}`;
+  }
+  if (doc.action.type === "nomear_dou") {
+    return `Portaria no DOU (${doc.action.simbolo}): ${doc.action.nomeado} — ${doc.action.cargo}`;
+  }
+  return `Dossiê da Presidência: ${doc.action.titulo}`;
+}
+
 export default function App() {
   const game = useCabinetGame();
   const [voice, setVoice] = useState(DEFAULT_LIVE_VOICE);
@@ -58,13 +69,30 @@ export default function App() {
   const accessCodeRef = useRef(accessCode);
   accessCodeRef.current = accessCode;
 
+  const entriesRef = useRef(entries);
+  entriesRef.current = entries;
+
+  const chatAbortRef = useRef<AbortController | null>(null);
+  const isSendingRef = useRef<boolean>(false);
+
   const lastDeltaMetaRef = useRef<{
     role: "user" | "assistant";
     itemKey?: string;
     at: number;
   } | null>(null);
 
-  // Fetch server health ONCE on mount (fixes duplicate health fetch bug)
+  const clearAccessCode = useCallback(() => {
+    setAccessCode("");
+    accessCodeRef.current = "";
+    try {
+      window.sessionStorage.removeItem("gabinete_vava_code");
+    } catch {
+      // ignore storage errors
+    }
+    setShowAccessModal(true);
+  }, []);
+
+  // Fetch server health ONCE on mount
   useEffect(() => {
     let active = true;
     fetch("/api/health")
@@ -90,6 +118,14 @@ export default function App() {
     };
   }, []);
 
+  // Abort any in-flight chat request on unmount
+  useEffect(() => {
+    return () => {
+      chatAbortRef.current?.abort();
+      chatAbortRef.current = null;
+    };
+  }, []);
+
   const appendSystemEvent = useCallback((text: string) => {
     setEntries((prev) => [
       ...prev,
@@ -111,7 +147,7 @@ export default function App() {
         role: "system",
         source: "text",
         timestamp: formatNow(),
-        text: "",
+        text: describeDocument(doc),
         document: doc,
       },
     ]);
@@ -221,16 +257,16 @@ export default function App() {
     onSystemEvent: appendSystemEvent,
     onMoodHint: (hint) => game.setTransientMood(hint),
     onLiveTurnComplete: handleLiveTurnComplete,
-    onUnauthorized: () => setShowAccessModal(true),
+    onUnauthorized: clearAccessCode,
   });
   liveRef.current = live;
 
   const handleStartLive = () => {
-    if (requiresAccessCode && !accessCode) {
+    if (requiresAccessCode && !accessCodeRef.current) {
       setShowAccessModal(true);
       return;
     }
-    const recentHistory: RecentTurn[] = entries
+    const recentHistory: RecentTurn[] = entriesRef.current
       .filter((e) => e.role === "user" || e.role === "assistant")
       .slice(-8)
       .map((e) => ({
@@ -243,7 +279,7 @@ export default function App() {
       history: recentHistory,
       ledger: game.ledger,
       openingCue: scenario.liveOpeningCue,
-      accessCode,
+      accessCode: accessCodeRef.current,
     });
   };
 
@@ -256,35 +292,25 @@ export default function App() {
   };
 
   const handleSendText = async (message: string) => {
-    if (game.micCutSecondsLeft > 0) return;
+    if (game.micCutSecondsLeft > 0 || isSendingRef.current) return;
 
-    if (requiresAccessCode && !accessCode) {
+    if (requiresAccessCode && !accessCodeRef.current) {
       setShowAccessModal(true);
       return;
     }
+
+    const trimmedMsg = message.trim();
+    if (!trimmedMsg) return;
 
     const userEntry: ChatEntry = {
       id: makeId("usr"),
       role: "user",
       source: live.status === "live" ? "live" : "text",
       timestamp: formatNow(),
-      text: message,
+      text: trimmedMsg,
     };
-    setEntries((prev) => [...prev, userEntry]);
 
-    if (live.status === "live") {
-      const sent = live.sendLiveTextMessage(message);
-      if (sent) {
-        game.setTransientMood(inferMoodFromText(message, "falando"));
-        return;
-      }
-    }
-
-    setIsSendingText(true);
-    game.setTransientMood("falando");
-
-    const replyId = makeId("ast");
-    const history: RecentTurn[] = entries
+    const history: RecentTurn[] = entriesRef.current
       .filter((e) => e.role === "user" || e.role === "assistant")
       .slice(-14)
       .map((e) => ({
@@ -292,22 +318,49 @@ export default function App() {
         content: e.text,
       }));
 
+    setEntries((prev) => [...prev, userEntry]);
+
+    if (live.status === "live") {
+      const sent = live.sendLiveTextMessage(trimmedMsg);
+      if (sent) {
+        game.setTransientMood(inferMoodFromText(trimmedMsg, "falando"));
+        return;
+      }
+    }
+
+    isSendingRef.current = true;
+    setIsSendingText(true);
+    game.setTransientMood("falando");
+
+    chatAbortRef.current?.abort();
+    const controller = new AbortController();
+    chatAbortRef.current = controller;
+
+    const replyId = makeId("ast");
+    let streamBubbleAdded = false;
+    let fullReply = "";
+    let sseErrorMsg: string | null = null;
+
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          message,
+          message: trimmedMsg,
           history,
           ledger: game.ledger,
           stream: true,
-          accessCode,
+          accessCode: accessCodeRef.current,
         }),
+        signal: controller.signal,
       });
 
+      if (controller.signal.aborted) return;
+
       if (res.status === 401) {
-        setShowAccessModal(true);
-        appendSystemEvent("Senha de gabinete necessária.");
+        setEntries((prev) => prev.filter((item) => item.id !== userEntry.id));
+        clearAccessCode();
+        appendSystemEvent("Senha de gabinete inválida ou expirada.");
         return;
       }
 
@@ -319,26 +372,30 @@ export default function App() {
         return;
       }
 
-      let fullReply = "";
       const contentType = res.headers.get("Content-Type") || "";
 
       const processSseBlock = (block: string) => {
         let eventName = "message";
-        let dataLine = "";
+        const dataLines: string[] = [];
         for (const line of block.split("\n")) {
           if (line.startsWith("event:")) {
             eventName = line.slice(6).trim();
           } else if (line.startsWith("data:")) {
-            dataLine += line.slice(5).trim();
+            dataLines.push(line.slice(5).trim());
           }
         }
+        const dataLine = dataLines.join("\n");
         if (!dataLine) return;
         try {
           const payload = JSON.parse(dataLine) as {
             delta?: string;
             reply?: string;
+            error?: string;
           };
-          if (eventName === "delta" && payload.delta) {
+          if (eventName === "error") {
+            sseErrorMsg =
+              payload.error || "Oscilação na linha do gabinete. Tente novamente.";
+          } else if (eventName === "delta" && payload.delta) {
             fullReply += payload.delta;
             const liveText = fullReply;
             setEntries((prev) =>
@@ -360,7 +417,7 @@ export default function App() {
       };
 
       if (contentType.includes("text/event-stream") && res.body) {
-        // Insert live streaming bubble
+        streamBubbleAdded = true;
         setEntries((prev) => [
           ...prev,
           {
@@ -377,22 +434,46 @@ export default function App() {
         const decoder = new TextDecoder();
         let buffer = "";
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer = (buffer + decoder.decode(value, { stream: true }))
+              .replace(/\r\n/g, "\n")
+              .replace(/\r/g, "\n");
 
-          const blocks = buffer.split("\n\n");
-          buffer = blocks.pop() ?? "";
-          for (const block of blocks) {
-            processSseBlock(block);
+            const blocks = buffer.split("\n\n");
+            buffer = blocks.pop() ?? "";
+            for (const block of blocks) {
+              if (block.trim()) processSseBlock(block);
+            }
+          }
+
+          buffer = (buffer + decoder.decode())
+            .replace(/\r\n/g, "\n")
+            .replace(/\r/g, "\n");
+          if (buffer.trim()) {
+            for (const block of buffer.split("\n\n")) {
+              if (block.trim()) processSseBlock(block);
+            }
+          }
+        } finally {
+          try {
+            reader.releaseLock();
+          } catch {
+            // ignore
           }
         }
-        if (buffer.trim()) {
-          processSseBlock(buffer);
+
+        if (!fullReply.trim()) {
+          setEntries((prev) => prev.filter((item) => item.id !== replyId));
+        }
+        if (sseErrorMsg) {
+          appendSystemEvent(sseErrorMsg);
         }
       } else {
         const data = (await res.json().catch(() => ({}))) as { reply?: string };
+        if (controller.signal.aborted) return;
         fullReply = data.reply || "";
         if (fullReply) {
           setEntries((prev) => [
@@ -409,18 +490,21 @@ export default function App() {
         }
       }
 
-      // UNLOCK CHAT IMMEDIATELY after reply finishes — run AI Director asynchronously in background!
+      if (controller.signal.aborted) return;
+
+      // Unlock chat immediately after reply finishes — run AI Director asynchronously in background
+      isSendingRef.current = false;
       setIsSendingText(false);
 
-      if (fullReply.trim()) {
+      if (fullReply.trim() && !sseErrorMsg) {
         const fallbackMood = inferMoodFromText(fullReply, "falando");
         game.setTransientMood(fallbackMood);
 
         void game
           .evaluateTurnWithDirector({
-            userMessage: message,
+            userMessage: trimmedMsg,
             assistantReply: fullReply,
-            accessCode,
+            accessCode: accessCodeRef.current,
             nowLabel: formatNow(),
             isLive: false,
             onSystemEvent: appendSystemEvent,
@@ -438,14 +522,31 @@ export default function App() {
             }
           });
       }
-    } catch {
-      appendSystemEvent("Falha de conexão com o gabinete.");
+    } catch (err) {
+      if (streamBubbleAdded && !fullReply.trim()) {
+        setEntries((prev) => prev.filter((item) => item.id !== replyId));
+      }
+      if (
+        !controller.signal.aborted &&
+        !(err instanceof DOMException && err.name === "AbortError")
+      ) {
+        appendSystemEvent("Falha de conexão com o gabinete.");
+      }
     } finally {
+      if (chatAbortRef.current === controller) {
+        chatAbortRef.current = null;
+      }
+      isSendingRef.current = false;
       setIsSendingText(false);
     }
   };
 
   const handleSelectScenario = (scenarioId: ScenarioId) => {
+    chatAbortRef.current?.abort();
+    chatAbortRef.current = null;
+    isSendingRef.current = false;
+    setIsSendingText(false);
+
     if (live.status === "live" || live.status === "connecting") {
       live.disconnect();
     }
@@ -459,6 +560,7 @@ export default function App() {
 
   const handleVerifiedAccessCode = (code: string) => {
     setAccessCode(code);
+    accessCodeRef.current = code;
     setShowAccessModal(false);
     try {
       window.sessionStorage.setItem("gabinete_vava_code", code);
@@ -469,7 +571,7 @@ export default function App() {
 
   const activeScenario = SCENARIOS[game.ledger.scenarioId] ?? SCENARIOS.livre;
 
-  // Allow "falando" portrait to show while text is streaming too (fixes Bug #2!)
+  // Allow "falando" portrait to show while text is streaming too
   const effectiveStageMood =
     live.isSpeaking || isSendingText
       ? game.mood === "neutro"
@@ -491,6 +593,17 @@ export default function App() {
         onToggleSfx={game.toggleSfxMute}
         onResetChat={handleResetChat}
       />
+
+      {/* Alerta de Interrupção de Bastidor fora do .avatar-stage para não ser cortado por transform/overflow no mobile */}
+      {game.activeInterrupt && (
+        <div className="interrupt-ribbon" role="status" aria-live="polite">
+          <Radio size={14} aria-hidden="true" />
+          <div>
+            <strong>{game.activeInterrupt.badge}</strong>
+            <span>{game.activeInterrupt.headline}</span>
+          </div>
+        </div>
+      )}
 
       <div className="cabinet-container">
         <CabinetMetersBar
@@ -514,7 +627,6 @@ export default function App() {
             inputLevel={live.inputLevel}
             remainingSeconds={live.remainingSeconds}
             error={live.error}
-            activeInterrupt={game.activeInterrupt}
             documents={game.ledger.documents}
             onInspectDocument={(doc) => game.setActiveDocument(doc)}
             onStartLive={handleStartLive}
@@ -528,7 +640,7 @@ export default function App() {
             headlineTicker={game.ledger.headlineTicker}
             scenarioBadge={activeScenario.badge}
             suggestedMoves={game.ledger.suggestedMoves}
-            isLive={live.status === "live"}
+            liveStatus={live.status}
             isSendingText={isSendingText}
             micCutSecondsLeft={game.micCutSecondsLeft}
             onSendText={(msg) => void handleSendText(msg)}

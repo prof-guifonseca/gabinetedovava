@@ -15,14 +15,62 @@ const AVATAR_PATHS: Record<AvatarMood, string> = {
   telefone: "/avatars/vava-telefone.jpg",
 };
 
-function loadImage(src: string): Promise<HTMLImageElement | null> {
+function loadImage(
+  src: string,
+  timeoutMs = 6000
+): Promise<HTMLImageElement | null> {
   return new Promise((resolve) => {
     const img = new Image();
     img.crossOrigin = "anonymous";
-    img.onload = () => resolve(img);
-    img.onerror = () => resolve(null);
+    let settled = false;
+
+    const finish = (result: HTMLImageElement | null) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      img.onload = null;
+      img.onerror = null;
+      resolve(result);
+    };
+
+    const timer = window.setTimeout(() => finish(null), timeoutMs);
+    img.onload = () => finish(img);
+    img.onerror = () => finish(null);
     img.src = src;
   });
+}
+
+function splitLongToken(
+  ctx: CanvasRenderingContext2D,
+  token: string,
+  maxWidth: number
+): string[] {
+  if (ctx.measureText(token).width <= maxWidth) return [token];
+  const parts: string[] = [];
+  let slice = "";
+  for (const ch of token) {
+    const candidate = slice + ch;
+    if (slice && ctx.measureText(candidate).width > maxWidth) {
+      parts.push(slice);
+      slice = ch;
+    } else {
+      slice = candidate;
+    }
+  }
+  if (slice) parts.push(slice);
+  return parts;
+}
+
+function fitLineWithEllipsis(
+  ctx: CanvasRenderingContext2D,
+  line: string,
+  maxWidth: number
+): string {
+  let trimmed = line.replace(/[.,;!?]*$/, "").trimEnd();
+  while (trimmed.length > 0 && ctx.measureText(`${trimmed}…`).width > maxWidth) {
+    trimmed = trimmed.slice(0, -1).trimEnd();
+  }
+  return trimmed ? `${trimmed}…` : "…";
 }
 
 function wrapText(
@@ -31,25 +79,48 @@ function wrapText(
   maxWidth: number,
   maxLines: number
 ): string[] {
-  const words = text.trim().split(/\s+/);
+  const rawWords = text.trim().split(/\s+/).filter(Boolean);
+  const tokens: string[] = [];
+  for (const word of rawWords) {
+    tokens.push(...splitLongToken(ctx, word, maxWidth));
+  }
+
   const lines: string[] = [];
   let current = "";
+  let truncated = false;
 
-  for (const word of words) {
-    const test = current ? `${current} ${word}` : word;
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    const test = current ? `${current} ${token}` : token;
     if (ctx.measureText(test).width <= maxWidth) {
       current = test;
     } else {
-      if (current) lines.push(current);
-      current = word;
-      if (lines.length >= maxLines) break;
+      if (current) {
+        lines.push(current);
+      }
+      if (lines.length >= maxLines) {
+        truncated = true;
+        current = "";
+        break;
+      }
+      current = token;
     }
   }
-  if (current && lines.length < maxLines) {
-    lines.push(current);
+
+  if (current) {
+    if (lines.length < maxLines) {
+      lines.push(current);
+    } else {
+      truncated = true;
+    }
   }
-  if (lines.length === maxLines && words.join(" ").length > lines.join(" ").length) {
-    lines[maxLines - 1] = `${lines[maxLines - 1].replace(/[.,;!?]*$/, "")}…`;
+
+  if (truncated && lines.length > 0) {
+    lines[lines.length - 1] = fitLineWithEllipsis(
+      ctx,
+      lines[lines.length - 1],
+      maxWidth
+    );
   }
   return lines;
 }
@@ -60,16 +131,17 @@ function drawStamp(
   x: number,
   y: number,
   color = "#b91c1c",
-  angleRad = -0.14
+  angleRad = -0.14,
+  fontSize = 30
 ) {
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(angleRad);
-  ctx.font = '700 32px "IBM Plex Mono", monospace';
-  const width = ctx.measureText(text).width + 44;
-  const height = 62;
+  ctx.font = `700 ${fontSize}px "IBM Plex Mono", monospace`;
+  const width = ctx.measureText(text).width + 38;
+  const height = Math.round(fontSize * 1.9);
   ctx.strokeStyle = color;
-  ctx.lineWidth = 5;
+  ctx.lineWidth = 4;
   ctx.strokeRect(-width / 2, -height / 2, width, height);
   ctx.lineWidth = 2;
   ctx.strokeRect(-width / 2 + 6, -height / 2 + 6, width - 12, height - 12);
@@ -163,7 +235,7 @@ export async function generateQuoteCard(params: {
     ctx.fillStyle = "#f4e6c2";
     ctx.font = '600 18px "IBM Plex Mono", monospace';
     ctx.textAlign = "center";
-    ctx.fillText(params.badge.toUpperCase().slice(0, 22), 859, 111);
+    ctx.fillText(params.badge.toUpperCase().slice(0, 22), 859, 111, 260);
     ctx.textAlign = "left";
   }
 
@@ -174,7 +246,7 @@ export async function generateQuoteCard(params: {
 
   ctx.fillStyle = "#f7f1e3";
   ctx.font = '600 40px "Newsreader", Georgia, serif';
-  const lines = wrapText(ctx, params.quote, 880, 6);
+  const lines = wrapText(ctx, params.quote, 880, 5);
   lines.forEach((line, idx) => {
     ctx.fillText(line, 112, 636 + idx * 54);
   });
@@ -188,7 +260,7 @@ export async function generateQuoteCard(params: {
 
   ctx.fillStyle = "#f5ecd7";
   ctx.font = '700 28px "Plus Jakarta Sans", system-ui, sans-serif';
-  ctx.fillText('Dep. Dr. Valdemar "Vavá" Braga (PMD/DF)', 84, 956);
+  ctx.fillText('Dep. Dr. Valdemar "Vavá" Braga (PMD/DF)', 84, 956, 600);
 
   ctx.fillStyle = "#d4a843";
   ctx.font = '500 20px "IBM Plex Mono", monospace';
@@ -238,7 +310,8 @@ export async function generateDocumentCard(doc: CabinetDocument): Promise<Blob> 
       ? "EMENDA DE RELATOR (URGÊNCIA)"
       : "GAVETA DA PRESIDÊNCIA — CONFIDENCIAL",
     540,
-    172
+    172,
+    920
   );
 
   ctx.fillStyle = "#5c4c3a";
@@ -246,7 +319,8 @@ export async function generateDocumentCard(doc: CabinetDocument): Promise<Blob> 
   ctx.fillText(
     `GABINETE 412 • ANEXO IV • REGISTRO ${doc.createdAt} • SÁTIRA FICCIONAL`,
     540,
-    212
+    212,
+    920
   );
 
   ctx.strokeStyle = "#2b2118";
@@ -261,11 +335,11 @@ export async function generateDocumentCard(doc: CabinetDocument): Promise<Blob> 
 
   if (doc.action.type === "carimbar_emenda") {
     ctx.font = '700 26px "IBM Plex Mono", monospace';
-    ctx.fillText(`PROTOCOLO: ${doc.action.protocolo}`, 96, 296);
+    ctx.fillText(`PROTOCOLO: ${doc.action.protocolo}`, 96, 296, 888);
 
     ctx.fillStyle = "#0d3b2e";
     ctx.font = '700 68px "Newsreader", Georgia, serif';
-    ctx.fillText(`R$ ${doc.action.valorMilhoes},0 MILHÕES`, 96, 386);
+    ctx.fillText(`R$ ${doc.action.valorMilhoes},0 MILHÕES`, 96, 386, 888);
 
     ctx.fillStyle = "#1c1510";
     ctx.font = '600 32px "Newsreader", Georgia, serif';
@@ -279,24 +353,30 @@ export async function generateDocumentCard(doc: CabinetDocument): Promise<Blob> 
 
     // Fine print jabuti box
     ctx.fillStyle = "#ebe1c7";
-    ctx.fillRect(96, 636, 888, 196);
+    ctx.fillRect(96, 622, 888, 196);
     ctx.strokeStyle = "#b91c1c";
     ctx.lineWidth = 2;
-    ctx.strokeRect(96, 636, 888, 196);
+    ctx.strokeRect(96, 622, 888, 196);
 
     ctx.fillStyle = "#b91c1c";
     ctx.font = '700 20px "IBM Plex Mono", monospace';
-    ctx.fillText("PARÁGRAFO ÚNICO (JABUTI TÉCNICO INSERIDO ÀS 03h14):", 118, 676);
+    ctx.fillText(
+      "PARÁGRAFO ÚNICO (JABUTI TÉCNICO INSERIDO ÀS 03h14):",
+      118,
+      662,
+      844
+    );
 
     ctx.fillStyle = "#33261b";
     ctx.font = '500 24px "IBM Plex Mono", monospace';
     const jabLines = wrapText(ctx, doc.action.jabutiOculto, 844, 4);
-    jabLines.forEach((l, i) => ctx.fillText(l, 118, 718 + i * 32));
+    jabLines.forEach((l, i) => ctx.fillText(l, 118, 704 + i * 32));
 
-    drawStamp(ctx, "CARIMBADO EM URGÊNCIA", 760, 415, "#b91c1c", -0.15);
+    // Placed cleanly in open right margin above signature footer (zero overlap!)
+    drawStamp(ctx, "CARIMBADO EM URGÊNCIA", 780, 882, "#b91c1c", -0.07, 23);
   } else if (doc.action.type === "nomear_dou") {
     ctx.font = '700 24px "IBM Plex Mono", monospace';
-    ctx.fillText(`PORTARIA Nº 4.171/PMD • CARGO ${doc.action.simbolo}`, 96, 298);
+    ctx.fillText(`PORTARIA Nº 4.171/PMD • CARGO ${doc.action.simbolo}`, 96, 298, 888);
 
     ctx.font = '700 36px "Newsreader", Georgia, serif';
     const bodyText = `O PRESIDENTE DA CÂMARA DOS DEPUTADOS, no uso de suas atribuições de balcão e consenso regimental, RESOLVE NOMEAR ${doc.action.nomeado.toUpperCase()} para exercer o cargo em comissão de ${doc.action.cargo}, código ${doc.action.simbolo}, com remuneração mensal de ${doc.action.salarioMensal}.`;
@@ -311,9 +391,9 @@ export async function generateDocumentCard(doc: CabinetDocument): Promise<Blob> 
       880,
       3
     );
-    justLines.forEach((l, i) => ctx.fillText(l, 96, 738 + i * 36));
+    justLines.forEach((l, i) => ctx.fillText(l, 96, 728 + i * 36));
 
-    drawStamp(ctx, "PUBLICADO NO DOU", 760, 780, "#0d3b2e", -0.12);
+    drawStamp(ctx, "PUBLICADO NO DOU", 790, 882, "#0d3b2e", -0.08, 25);
   } else {
     ctx.fillStyle = "#b91c1c";
     ctx.font = '700 34px "Newsreader", Georgia, serif';
@@ -323,7 +403,7 @@ export async function generateDocumentCard(doc: CabinetDocument): Promise<Blob> 
     ctx.fillStyle = "#1c1510";
     ctx.font = '500 30px "Newsreader", Georgia, serif';
     const resLines = wrapText(ctx, doc.action.resumo, 880, 5);
-    resLines.forEach((l, i) => ctx.fillText(l, 96, 444 + i * 42));
+    resLines.forEach((l, i) => ctx.fillText(l, 96, 434 + i * 42));
 
     ctx.fillStyle = "#5c1b1b";
     ctx.font = '700 24px "IBM Plex Mono", monospace';
@@ -333,27 +413,27 @@ export async function generateDocumentCard(doc: CabinetDocument): Promise<Blob> 
       880,
       4
     );
-    threatLines.forEach((l, i) => ctx.fillText(l, 96, 690 + i * 34));
+    threatLines.forEach((l, i) => ctx.fillText(l, 96, 680 + i * 34));
 
-    drawStamp(ctx, "CONFIDENCIAL", 780, 320, "#b91c1c", 0.14);
+    drawStamp(ctx, "CONFIDENCIAL", 805, 882, "#b91c1c", -0.08, 26);
   }
 
   // Signature line
   ctx.strokeStyle = "#2b2118";
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(96, 932);
-  ctx.lineTo(540, 932);
+  ctx.moveTo(96, 936);
+  ctx.lineTo(540, 936);
   ctx.stroke();
 
   ctx.fillStyle = "#1c1510";
   ctx.font = '700 22px "Newsreader", Georgia, serif';
-  ctx.fillText('Dep. Dr. Valdemar "Vavá" Braga — Presidente', 96, 966);
+  ctx.fillText('Dep. Dr. Valdemar "Vavá" Braga — Presidente', 96, 970);
 
   ctx.fillStyle = "#6e5a44";
   ctx.font = '600 20px "IBM Plex Mono", monospace';
   ctx.textAlign = "right";
-  ctx.fillText("gabinetedovava.pages.dev", 984, 966);
+  ctx.fillText("gabinetedovava.pages.dev", 984, 970);
   ctx.textAlign = "left";
 
   return canvasToBlob(canvas);
@@ -380,13 +460,14 @@ export async function generateDossierCard(ledger: SessionLedger): Promise<Blob> 
   ctx.lineWidth = 4;
   ctx.strokeRect(36, 36, 1008, 1008);
 
-  // Header
+  // Header constrained to maxWidth=650 so it never collides with right portrait (x=756)
   ctx.fillStyle = "#d4a843";
-  ctx.font = '700 22px "IBM Plex Mono", monospace';
+  ctx.font = '700 21px "IBM Plex Mono", monospace';
   ctx.fillText(
-    `ATA DA AUDIÊNCIA • ${scenario.title.toUpperCase()} • GABINETE 412`,
+    `ATA DA AUDIÊNCIA • ${scenario.title.toUpperCase()} • GAB. 412`,
     76,
-    102
+    102,
+    650
   );
 
   // Small portrait right
@@ -409,12 +490,12 @@ export async function generateDossierCard(ledger: SessionLedger): Promise<Blob> 
   // Archetype headline
   ctx.fillStyle = "#f7f1e3";
   ctx.font = '700 54px "Newsreader", Georgia, serif';
-  const titleLines = wrapText(ctx, arch.title, 640, 2);
+  const titleLines = wrapText(ctx, arch.title, 650, 2);
   titleLines.forEach((l, i) => ctx.fillText(l, 76, 178 + i * 62));
 
   ctx.fillStyle = "#c9bca7";
   ctx.font = '500 26px "Plus Jakarta Sans", system-ui, sans-serif';
-  const subLines = wrapText(ctx, arch.subtitle, 640, 3);
+  const subLines = wrapText(ctx, arch.subtitle, 650, 3);
   subLines.forEach((l, i) => ctx.fillText(l, 76, 304 + i * 36));
 
   // 4 Meters Grid
@@ -463,7 +544,7 @@ export async function generateDossierCard(ledger: SessionLedger): Promise<Blob> 
   const qLines = wrapText(ctx, `“${quoteText}”`, 872, 4);
   qLines.forEach((l, i) => ctx.fillText(l, 104, 770 + i * 38));
 
-  drawStamp(ctx, arch.stamp, 810, 954, "#d4a843", -0.08);
+  drawStamp(ctx, arch.stamp, 810, 954, "#d4a843", -0.08, 26);
 
   ctx.fillStyle = "#c9bca7";
   ctx.font = '600 22px "IBM Plex Mono", monospace';
@@ -511,7 +592,7 @@ export async function shareImageNativeOrCopy(
   filename: string,
   title = "Gabinete do Vavá",
   text = "Olha o que o Dr. Vavá aprontou no Gabinete 412: https://gabinetedovava.pages.dev"
-): Promise<"shared" | "copied" | "downloaded"> {
+): Promise<"shared" | "copied" | "downloaded" | "cancelled"> {
   try {
     if (
       typeof navigator !== "undefined" &&
@@ -529,7 +610,7 @@ export async function shareImageNativeOrCopy(
     }
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
-      return "shared";
+      return "cancelled";
     }
   }
   return copyImageOrDownload(blob, filename);

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Copy, Download, MessageSquareWarning, X } from "lucide-react";
 import type { CabinetDocument } from "../shared/gameState";
 import {
@@ -6,6 +6,7 @@ import {
   generateDocumentCard,
   shareImageNativeOrCopy,
 } from "../utils/shareCardGenerator";
+import { useModalBehavior } from "../hooks/useModalBehavior";
 
 interface DocumentOverlayProps {
   document: CabinetDocument | null;
@@ -20,8 +21,39 @@ export function DocumentOverlay({
 }: DocumentOverlayProps) {
   const [shareFeedback, setShareFeedback] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const feedbackTimerRef = useRef<number | null>(null);
+
+  useModalBehavior(Boolean(doc), onClose);
+
+  // Reset transient feedback state when opening a new document or closing
+  useEffect(() => {
+    setShareFeedback(null);
+    setBusy(false);
+    if (feedbackTimerRef.current !== null) {
+      window.clearTimeout(feedbackTimerRef.current);
+      feedbackTimerRef.current = null;
+    }
+  }, [doc?.id]);
+
+  useEffect(() => {
+    return () => {
+      if (feedbackTimerRef.current !== null) {
+        window.clearTimeout(feedbackTimerRef.current);
+      }
+    };
+  }, []);
 
   if (!doc) return null;
+
+  const scheduleFeedbackClear = () => {
+    if (feedbackTimerRef.current !== null) {
+      window.clearTimeout(feedbackTimerRef.current);
+    }
+    feedbackTimerRef.current = window.setTimeout(() => {
+      feedbackTimerRef.current = null;
+      setShareFeedback(null);
+    }, 2600);
+  };
 
   const handleExport = async (mode: "copy" | "download") => {
     setBusy(true);
@@ -31,6 +63,7 @@ export function DocumentOverlay({
       if (mode === "download") {
         downloadBlob(blob, filename);
         setShareFeedback("PNG salvo!");
+        scheduleFeedbackClear();
       } else {
         const result = await shareImageNativeOrCopy(
           blob,
@@ -38,6 +71,9 @@ export function DocumentOverlay({
           "Documento do Gabinete do Vavá",
           "Olha o documento que o Dr. Vavá carimbou no Gabinete 412: https://gabinetedovava.pages.dev"
         );
+        if (result === "cancelled") {
+          return;
+        }
         setShareFeedback(
           result === "shared"
             ? "Compartilhado!"
@@ -45,8 +81,11 @@ export function DocumentOverlay({
             ? "Imagem copiada! Cole no WhatsApp."
             : "PNG salvo!"
         );
+        scheduleFeedbackClear();
       }
-      window.setTimeout(() => setShareFeedback(null), 2600);
+    } catch {
+      setShareFeedback("Erro ao gerar PNG.");
+      scheduleFeedbackClear();
     } finally {
       setBusy(false);
     }
@@ -89,36 +128,36 @@ export function DocumentOverlay({
           {doc.action.type === "carimbar_emenda" && (() => {
             const emenda = doc.action;
             return (
-            <>
-              <div className="paper-stamp is-red">CARIMBADO</div>
-              <p className="paper-mono">PROTOCOLO: {emenda.protocolo}</p>
-              <div className="paper-amount">R$ {emenda.valorMilhoes},0 MILHÕES</div>
-              <p className="paper-paragraph">
-                <strong>Objeto declarado:</strong> {emenda.destino}
-              </p>
+              <>
+                <div className="paper-stamp is-red">CARIMBADO</div>
+                <p className="paper-mono">PROTOCOLO: {emenda.protocolo}</p>
+                <div className="paper-amount">R$ {emenda.valorMilhoes},0 MILHÕES</div>
+                <p className="paper-paragraph">
+                  <strong>Objeto declarado:</strong> {emenda.destino}
+                </p>
 
-              <div className="jabuti-box">
-                <span className="jabuti-label">
-                  PARÁGRAFO ÚNICO (JABUTI TÉCNICO INSERIDO ÀS 03h14):
-                </span>
-                <p>{emenda.jabutiOculto}</p>
-                {onConfrontJabuti && (
-                  <button
-                    type="button"
-                    className="btn-confront-jabuti"
-                    onClick={() => {
-                      onConfrontJabuti(
-                        `Ei, Presidente! Que jabuti escondido é esse aqui no rodapé da emenda: "${emenda.jabutiOculto}"?! Tira isso já!`
-                      );
-                      onClose();
-                    }}
-                  >
-                    <MessageSquareWarning size={14} />
-                    Confrontar o Vavá sobre esse Jabuti!
-                  </button>
-                )}
-              </div>
-            </>
+                <div className="jabuti-box">
+                  <span className="jabuti-label">
+                    PARÁGRAFO ÚNICO (JABUTI TÉCNICO INSERIDO ÀS 03h14):
+                  </span>
+                  <p>{emenda.jabutiOculto}</p>
+                  {onConfrontJabuti && (
+                    <button
+                      type="button"
+                      className="btn-confront-jabuti"
+                      onClick={() => {
+                        onConfrontJabuti(
+                          `Ei, Presidente! Que jabuti escondido é esse aqui no rodapé da emenda: "${emenda.jabutiOculto}"?! Tira isso já!`
+                        );
+                        onClose();
+                      }}
+                    >
+                      <MessageSquareWarning size={14} />
+                      Confrontar o Vavá sobre esse Jabuti!
+                    </button>
+                  )}
+                </div>
+              </>
             );
           })()}
 
@@ -140,17 +179,35 @@ export function DocumentOverlay({
             </>
           )}
 
-          {doc.action.type === "puxar_dossie" && (
-            <>
-              <div className="paper-stamp is-red">CONFIDENCIAL</div>
-              <h4 className="paper-dossier-title">{doc.action.titulo}</h4>
-              <p className="paper-paragraph">{doc.action.resumo}</p>
-              <div className="jabuti-box">
-                <span className="jabuti-label">NA GAVETA DO PRESIDENTE:</span>
-                <p>{doc.action.ameaca}</p>
-              </div>
-            </>
-          )}
+          {doc.action.type === "puxar_dossie" && (() => {
+            const dossie = doc.action;
+            return (
+              <>
+                <div className="paper-stamp is-red">CONFIDENCIAL</div>
+                <h4 className="paper-dossier-title">{dossie.titulo}</h4>
+                <p className="paper-paragraph">{dossie.resumo}</p>
+                <div className="jabuti-box">
+                  <span className="jabuti-label">NA GAVETA DO PRESIDENTE:</span>
+                  <p>{dossie.ameaca}</p>
+                  {onConfrontJabuti && (
+                    <button
+                      type="button"
+                      className="btn-confront-jabuti"
+                      onClick={() => {
+                        onConfrontJabuti(
+                          `Isso é chantagem de gaveta, Presidente! Esse dossiê "${dossie.titulo}" não me intimida — vai bancar isso no plenário ou vai recuar?`
+                        );
+                        onClose();
+                      }}
+                    >
+                      <MessageSquareWarning size={14} />
+                      Confrontar o Vavá sobre esse Dossiê!
+                    </button>
+                  )}
+                </div>
+              </>
+            );
+          })()}
         </div>
 
         <div className="paper-signature">

@@ -1,12 +1,38 @@
 class CabinetSfxEngine {
   private ctx: AudioContext | null = null;
   private muted = false;
+  private unlocked = false;
 
   constructor() {
-    try {
-      this.muted = window.localStorage.getItem("gabinete_vava_sfx_muted") === "1";
-    } catch {
-      this.muted = false;
+    if (typeof window !== "undefined") {
+      try {
+        this.muted =
+          window.localStorage.getItem("gabinete_vava_sfx_muted") === "1";
+      } catch {
+        this.muted = false;
+      }
+
+      const unlock = () => {
+        this.unlocked = true;
+        if (this.ctx && this.ctx.state === "suspended") {
+          void this.ctx.resume().catch(() => {});
+        }
+        window.removeEventListener("pointerdown", unlock, true);
+        window.removeEventListener("keydown", unlock, true);
+        window.removeEventListener("touchstart", unlock, true);
+      };
+      window.addEventListener("pointerdown", unlock, {
+        capture: true,
+        passive: true,
+      });
+      window.addEventListener("keydown", unlock, {
+        capture: true,
+        passive: true,
+      });
+      window.addEventListener("touchstart", unlock, {
+        capture: true,
+        passive: true,
+      });
     }
   }
 
@@ -23,7 +49,7 @@ class CabinetSfxEngine {
     }
   }
 
-  private ensureContext(): AudioContext | null {
+  private ensureContext(fromUserGesture = false): AudioContext | null {
     if (this.muted || typeof window === "undefined") return null;
     try {
       if (!this.ctx) {
@@ -36,6 +62,13 @@ class CabinetSfxEngine {
       }
       if (this.ctx.state === "suspended") {
         void this.ctx.resume().catch(() => {});
+        // Avoid queueing bursts of background sounds while blocked by autoplay policy
+        if (!fromUserGesture && !this.unlocked) {
+          return null;
+        }
+      }
+      if (this.ctx.state === "running") {
+        this.unlocked = true;
       }
       return this.ctx;
     } catch {
@@ -168,12 +201,15 @@ class CabinetSfxEngine {
       oscA.frequency.setValueAtTime(440, t);
       oscB.frequency.setValueAtTime(480, t);
 
+      // Clamp LFO modulation down to 0 before master fades so total gain never goes negative
       lfo.type = "square";
       lfo.frequency.setValueAtTime(18, t);
-      lfoGain.gain.setValueAtTime(0.07, t);
+      lfoGain.gain.setValueAtTime(0.06, t);
+      lfoGain.gain.setValueAtTime(0.06, t + Math.max(0.02, duration - 0.06));
+      lfoGain.gain.linearRampToValueAtTime(0, t + Math.max(0.03, duration - 0.03));
 
       master.gain.setValueAtTime(0.08, t);
-      master.gain.setValueAtTime(0.08, t + duration - 0.03);
+      master.gain.setValueAtTime(0.08, t + Math.max(0.03, duration - 0.035));
       master.gain.exponentialRampToValueAtTime(0.001, t + duration);
 
       lfo.connect(lfoGain).connect(master.gain);
@@ -258,7 +294,7 @@ class CabinetSfxEngine {
 
   /** Toque seco sutil de papel ao puxar Carta na Manga ou Crachá */
   public playPaperTap(): void {
-    const ctx = this.ensureContext();
+    const ctx = this.ensureContext(true);
     if (!ctx) return;
     const t = ctx.currentTime;
 

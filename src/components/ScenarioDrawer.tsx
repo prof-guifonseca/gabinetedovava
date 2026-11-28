@@ -3,6 +3,7 @@ import type { ScenarioId } from "../shared/gameState";
 import { SCENARIO_LIST } from "../shared/scenarios";
 import type { SavedAchievement } from "../hooks/useCabinetGame";
 import { cabinetSfx } from "../audio/cabinetSfx";
+import { useModalBehavior } from "../hooks/useModalBehavior";
 
 interface ScenarioDrawerProps {
   open: boolean;
@@ -19,6 +20,8 @@ export function ScenarioDrawer({
   onSelectScenario,
   onClose,
 }: ScenarioDrawerProps) {
+  useModalBehavior(open, onClose);
+
   if (!open) return null;
 
   return (
@@ -99,7 +102,7 @@ export function ScenarioDrawer({
         )}
 
         <div className="trinca-bar">
-          <span className="trinca-label">TRINCA CAÓTICA DO ANEXO IV</span>
+          <span className="trinca-label">QUARTETO CAÓTICO DA CÂMARA</span>
           <div className="trinca-links">
             <span className="trinca-pill is-current">
               Gab. 412 · Dr. Vavá (Você está aqui)
@@ -110,7 +113,7 @@ export function ScenarioDrawer({
               rel="noreferrer"
               className="trinca-pill"
             >
-              Gab. 717 · Prof. Bento (Minoria) <ExternalLink size={11} />
+              Gab. 717 · Prof. Bento (Minoria · Anexo II) <ExternalLink size={11} />
             </a>
             <a
               href="https://gabinetedaclarice.pages.dev"
@@ -124,10 +127,9 @@ export function ScenarioDrawer({
               href="https://plenariocaotico.pages.dev"
               target="_blank"
               rel="noreferrer"
-              className="trinca-pill"
-              style={{ borderColor: "rgba(212, 164, 70, 0.7)", fontWeight: 700 }}
+              className="trinca-pill is-plenario"
             >
-              🏛️ Plenário Caótico · Debate dos 3 ao Vivo <ExternalLink size={11} />
+              🏛️ Plenário Caótico · Debate dos 4 ao Vivo <ExternalLink size={11} />
             </a>
           </div>
         </div>

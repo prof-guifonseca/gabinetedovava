@@ -81,7 +81,7 @@ export const SCENARIOS: Record<ScenarioId, ScenarioDefinition> = {
       verbaMilhoes: 0,
       paciencia: 80,
     },
-    initialHeadline: "ORÇAMENTO 2026 • COLÉGIO DE LÍDERES DISCUTE EMENDAS DE RELATOR",
+    initialHeadline: `ORÇAMENTO ${new Date().getFullYear()} • COLÉGIO DE LÍDERES DISCUTE EMENDAS DE RELATOR`,
     initialMoves: [
       {
         id: "pix-1",
@@ -187,7 +187,7 @@ export const SCENARIOS: Record<ScenarioId, ScenarioDefinition> = {
       },
     ],
     promptContext:
-      "MISSÃO ATIVA: O visitante quer salvar uma restinga litorânea que você quer concretar pra subir um paredão de prédios. Você odeia discurso ecológo puro, mas balança se ele falar a língua do voto, do turismo caro, de cargos ou de uma composição criativa!",
+      "MISSÃO ATIVA: O visitante quer salvar uma restinga litorânea que você quer concretar pra subir um paredão de prédios. Você odeia discurso ecológico puro, mas balança se ele falar a língua do voto, do turismo caro, de cargos ou de uma composição criativa!",
   },
 
   caca_cargo: {

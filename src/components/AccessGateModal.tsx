@@ -1,5 +1,6 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { KeyRound } from "lucide-react";
+import { useModalBehavior } from "../hooks/useModalBehavior";
 
 interface AccessGateModalProps {
   open: boolean;
@@ -10,6 +11,16 @@ export function AccessGateModal({ open, onVerified }: AccessGateModalProps) {
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
+
+  useModalBehavior(open);
+
+  useEffect(() => {
+    if (open) {
+      setCode("");
+      setError(null);
+      setVerifying(false);
+    }
+  }, [open]);
 
   if (!open) return null;
 
@@ -42,7 +53,12 @@ export function AccessGateModal({ open, onVerified }: AccessGateModalProps) {
   };
 
   return (
-    <div className="modal-backdrop" role="dialog" aria-modal="true">
+    <div
+      className="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Credencial de acesso ao Gabinete do Vavá"
+    >
       <form className="modal-card" onSubmit={(e) => void handleSubmit(e)}>
         <p className="modal-kicker">PORTARIA DO GABINETE 412 · ANEXO IV</p>
         <h3 style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -56,12 +72,17 @@ export function AccessGateModal({ open, onVerified }: AccessGateModalProps) {
         <input
           type="password"
           className="chat-input"
+          aria-label="Senha de acesso do gabinete"
           placeholder="Digite a senha do gabinete..."
           value={code}
           onChange={(e) => setCode(e.target.value)}
           autoFocus
         />
-        {error && <div className="error-banner">{error}</div>}
+        {error && (
+          <div className="error-banner" role="alert">
+            {error}
+          </div>
+        )}
         <button
           type="submit"
           className="btn-voice"

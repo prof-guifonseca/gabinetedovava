@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Check, FileText, Mic, MicOff, Send, Share2 } from "lucide-react";
-import type { ChatEntry } from "../hooks/useGptLiveSession";
+import type { ChatEntry, LiveConnectionState } from "../hooks/useGptLiveSession";
 import type { AvatarMood, CabinetDocument, SuggestedMove } from "../shared/gameState";
 import { ActionDeck } from "./ActionDeck";
 import {
@@ -13,7 +13,7 @@ interface TaquigrafiaPanelProps {
   headlineTicker: string;
   scenarioBadge: string;
   suggestedMoves: SuggestedMove[];
-  isLive: boolean;
+  liveStatus: LiveConnectionState;
   isSendingText: boolean;
   micCutSecondsLeft: number;
   onSendText: (message: string) => void;
@@ -52,7 +52,7 @@ export function TaquigrafiaPanel({
   headlineTicker,
   scenarioBadge,
   suggestedMoves,
-  isLive,
+  liveStatus,
   isSendingText,
   micCutSecondsLeft,
   onSendText,
@@ -63,24 +63,53 @@ export function TaquigrafiaPanel({
   const [sharingId, setSharingId] = useState<string | null>(null);
   const [copiedMeta, setCopiedMeta] = useState<{ id: string; label: string } | null>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
-  const feedRef = useRef<HTMLDivElement | null>(null);
 
+  const feedRef = useRef<HTMLDivElement | null>(null);
+  const isPinnedToBottomRef = useRef<boolean>(true);
+  const toastTimerRef = useRef<number | null>(null);
+  const copiedTimerRef = useRef<number | null>(null);
+
+  const isLive = liveStatus === "live";
+  const isConnectingLive = liveStatus === "connecting";
   const isInputBlocked = isSendingText || micCutSecondsLeft > 0;
 
-  // Bulletproof scroll-to-bottom on every entry delta, new document card, typing indicator, or viewport/keyboard resize
-  useEffect(() => {
+  // Hide typing indicator as soon as SSE reply text starts streaming into the last assistant bubble
+  const lastEntry = entries[entries.length - 1];
+  const hasStreamingReplyText =
+    isSendingText &&
+    lastEntry?.role === "assistant" &&
+    lastEntry.text.trim().length > 0;
+  const showTypingIndicator = isSendingText && !hasStreamingReplyText;
+
+  const handleFeedScroll = () => {
     const feed = feedRef.current;
     if (!feed) return;
+    const distanceFromBottom =
+      feed.scrollHeight - feed.scrollTop - feed.clientHeight;
+    isPinnedToBottomRef.current = distanceFromBottom < 100;
+  };
+
+  // Respect user scrolling up: only auto-scroll when pinned near the bottom
+  useEffect(() => {
+    const feed = feedRef.current;
+    if (!feed || !isPinnedToBottomRef.current) return;
+
     const scrollToBottom = () => {
-      feed.scrollTop = feed.scrollHeight;
+      if (isPinnedToBottomRef.current) {
+        feed.scrollTop = feed.scrollHeight;
+      }
     };
+
+    let raf2: number | null = null;
     const raf1 = requestAnimationFrame(() => {
       scrollToBottom();
-      requestAnimationFrame(scrollToBottom);
+      raf2 = requestAnimationFrame(scrollToBottom);
     });
     const timer = window.setTimeout(scrollToBottom, 80);
+
     return () => {
       cancelAnimationFrame(raf1);
+      if (raf2 !== null) cancelAnimationFrame(raf2);
       window.clearTimeout(timer);
     };
   }, [entries, isSendingText]);
@@ -89,9 +118,7 @@ export function TaquigrafiaPanel({
     const feed = feedRef.current;
     if (!feed || typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(() => {
-      const distanceFromBottom =
-        feed.scrollHeight - feed.scrollTop - feed.clientHeight;
-      if (distanceFromBottom < 140) {
+      if (isPinnedToBottomRef.current) {
         feed.scrollTop = feed.scrollHeight;
       }
     });
@@ -99,17 +126,33 @@ export function TaquigrafiaPanel({
     return () => ro.disconnect();
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+      if (copiedTimerRef.current !== null) {
+        window.clearTimeout(copiedTimerRef.current);
+      }
+    };
+  }, []);
+
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
     const trimmed = draft.trim();
     if (!trimmed || isInputBlocked) return;
+    isPinnedToBottomRef.current = true;
     setDraft("");
     onSendText(trimmed);
   };
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
-    window.setTimeout(() => {
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      toastTimerRef.current = null;
       setToastMsg((curr) => (curr === msg ? null : curr));
     }, 2600);
   };
@@ -129,6 +172,9 @@ export function TaquigrafiaPanel({
         "Aspas da TV Câmara — Gabinete do Vavá",
         `"${entry.text}" — Dep. Dr. Vavá Braga (https://gabinetedovava.pages.dev)`
       );
+      if (result === "cancelled") {
+        return;
+      }
       const label =
         result === "shared"
           ? "Enviado!"
@@ -143,7 +189,11 @@ export function TaquigrafiaPanel({
           ? "Card PNG copiado! Cole no WhatsApp."
           : "Card PNG salvo no seu dispositivo!"
       );
-      window.setTimeout(() => {
+      if (copiedTimerRef.current !== null) {
+        window.clearTimeout(copiedTimerRef.current);
+      }
+      copiedTimerRef.current = window.setTimeout(() => {
+        copiedTimerRef.current = null;
         setCopiedMeta((curr) => (curr?.id === entry.id ? null : curr));
       }, 2600);
     } catch {
@@ -166,7 +216,7 @@ export function TaquigrafiaPanel({
         </div>
       )}
 
-      <div className="chat-feed" ref={feedRef}>
+      <div className="chat-feed" ref={feedRef} onScroll={handleFeedScroll}>
         {entries.map((entry) => {
           if (entry.document) {
             const doc = entry.document;
@@ -196,6 +246,11 @@ export function TaquigrafiaPanel({
                 {entry.text}
               </div>
             );
+          }
+
+          // Don't render placeholder streaming bubble until the first token arrives
+          if (entry.role === "assistant" && !entry.text.trim()) {
+            return null;
           }
 
           const isAssistant = entry.role === "assistant";
@@ -240,7 +295,7 @@ export function TaquigrafiaPanel({
           );
         })}
 
-        {isSendingText && (
+        {showTypingIndicator && (
           <div className="msg-bubble is-system is-typing">
             Dr. Vavá está ajeitando a gravata pra responder...
           </div>
@@ -251,17 +306,36 @@ export function TaquigrafiaPanel({
         moves={suggestedMoves}
         disabled={isInputBlocked}
         onPickMove={(prompt) => {
-          if (!isInputBlocked) onSendText(prompt);
+          if (!isInputBlocked) {
+            isPinnedToBottomRef.current = true;
+            onSendText(prompt);
+          }
         }}
       />
 
       <form className="chat-composer" onSubmit={handleSubmit}>
         <button
           type="button"
-          className={`composer-mic-btn ${isLive ? "is-live" : ""}`}
+          className={`composer-mic-btn ${
+            isLive ? "is-live" : isConnectingLive ? "is-connecting" : ""
+          }`}
+          disabled={isConnectingLive}
+          aria-busy={isConnectingLive}
           onClick={onToggleVoiceCall}
-          title={isLive ? "Encerrar voz ao vivo" : "Falar por voz ao vivo"}
-          aria-label={isLive ? "Encerrar voz ao vivo" : "Falar por voz ao vivo"}
+          title={
+            isConnectingLive
+              ? "Conectando chamada de voz..."
+              : isLive
+              ? "Encerrar voz ao vivo"
+              : "Falar por voz ao vivo"
+          }
+          aria-label={
+            isConnectingLive
+              ? "Conectando chamada de voz"
+              : isLive
+              ? "Encerrar voz ao vivo"
+              : "Falar por voz ao vivo"
+          }
         >
           {isLive ? <MicOff size={18} /> : <Mic size={18} />}
         </button>
@@ -269,12 +343,15 @@ export function TaquigrafiaPanel({
         <input
           type="text"
           className="chat-input"
+          aria-label="Mensagem para o Dr. Vavá"
           value={draft}
           disabled={micCutSecondsLeft > 0}
           onChange={(e) => setDraft(e.target.value)}
           placeholder={
             micCutSecondsLeft > 0
               ? `Áudio cortado pela taquigrafia (${micCutSecondsLeft}s)...`
+              : isConnectingLive
+              ? "Conectando microfone ao vivo..."
               : isLive
               ? "Fale ou digite aqui..."
               : "Fale com o Dr. Vavá..."

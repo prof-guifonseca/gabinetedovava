@@ -5,6 +5,7 @@ interface __BaseEnv_Env {
 	ASSETS: Fetcher;
 	GPT_LIVE_MODEL: "gpt-live-1.1";
 	OPENAI_TEXT_MODEL: "gpt-6-luna";
+	OPENAI_DIRECTOR_MODEL?: string;
 	DEFAULT_VOICE: "voice_6b09d70a3c608191adc4ff0de2afbeec";
 	OPENAI_API_KEY: string;
 	ACCESS_CODE: string;

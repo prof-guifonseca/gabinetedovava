@@ -228,7 +228,7 @@ export function sanitizeDirectorPatch(raw: unknown): DirectorPatch {
         ).slice(0, 220);
         const protocolo = String(
           rawAction.protocolo ||
-            `RP9-${Math.floor(1000 + Math.random() * 8999)}/2026`
+            `RP9-${Math.floor(1000 + Math.random() * 8999)}/${new Date().getFullYear()}`
         ).slice(0, 32);
         action = {
           type: "carimbar_emenda",
@@ -354,6 +354,83 @@ export function sanitizeDirectorPatch(raw: unknown): DirectorPatch {
   };
 }
 
+export function evaluateScenarioOutcome(ledger: SessionLedger): {
+  endedReason?: SessionEndReason;
+  endedTitle?: string;
+  endedSummary?: string;
+  justEnded: boolean;
+} {
+  if (ledger.endedReason) {
+    return {
+      endedReason: ledger.endedReason,
+      endedTitle: ledger.endedTitle,
+      endedSummary: ledger.endedSummary,
+      justEnded: false,
+    };
+  }
+
+  const { meters, scenarioId, jabutisEngolidos, documents } = ledger;
+
+  if (meters.paciencia <= 0) {
+    return {
+      endedReason: "expulso",
+      endedTitle: "Sessão Encerrada pela Mesa Diretora",
+      endedSummary:
+        "A paciência do Dr. Vavá zerou. A taquigrafia cortou seu áudio e a Polícia Legislativa acompanhou você gentilmente até o elevador.",
+      justEnded: true,
+    };
+  }
+  if (scenarioId === "emenda_pix" && meters.verbaMilhoes >= 12) {
+    return {
+      endedReason: "vitoria",
+      endedTitle: "Emenda PIX Carimbada no Diário Oficial!",
+      endedSummary: `Você arrancou R$ ${meters.verbaMilhoes} milhões para Santa Rita do Asfalto — com apenas ${jabutisEngolidos} jabuti(s) do cunhado no rodapé.`,
+      justEnded: true,
+    };
+  }
+  if (scenarioId === "cpi_imprensa" && meters.riscoCpi >= 90) {
+    return {
+      endedReason: "vitoria",
+      endedTitle: "Manchete Nacional! CPI Aberta na Madrugada!",
+      endedSummary:
+        "Você encurralou o Presidente da Câmara até o Risco de CPI explodir. O áudio já está no Plantão da TV Câmara!",
+      justEnded: true,
+    };
+  }
+  if (scenarioId === "salve_restinga" && meters.apoioBase >= 80) {
+    return {
+      endedReason: "vitoria",
+      endedTitle: "Restinga Salva no Grito e no Consenso!",
+      endedSummary:
+        "Por milagre regimental, você convenceu a Mesa Diretora a engavetar o paredão de 40 andares (por enquanto).",
+      justEnded: true,
+    };
+  }
+  if (
+    scenarioId === "caca_cargo" &&
+    documents.some((d) => d.action.type === "nomear_dou")
+  ) {
+    return {
+      endedReason: "vitoria",
+      endedTitle: "Publicado no DOU — Sobrinho Empossado!",
+      endedSummary:
+        "Portaria assinada na caneta Montblanc! Seu indicado já tem crachá, sala no Anexo IV e café liberado.",
+      justEnded: true,
+    };
+  }
+  if (scenarioId !== "cpi_imprensa" && meters.riscoCpi >= 100) {
+    return {
+      endedReason: "cpi_estourou",
+      endedTitle: "Plantão Extra: Polícia Federal na Ante-Sala!",
+      endedSummary:
+        "O escândalo vazou antes da assinatura final. Vavá trancou a gaveta dos ofícios e convocou coletiva dizendo que foi tudo 'trabalho territorial'.",
+      justEnded: true,
+    };
+  }
+
+  return { justEnded: false };
+}
+
 export function applyDirectorPatch(
   ledger: SessionLedger,
   patch: DirectorPatch,
@@ -439,61 +516,7 @@ export function applyDirectorPatch(
     ? { text: trimmedReply, mood: patch.mood }
     : ledger.bestQuote;
 
-  // Evaluate scenario outcomes (only if not already ended)
-  let endedReason = ledger.endedReason;
-  let endedTitle = ledger.endedTitle;
-  let endedSummary = ledger.endedSummary;
-  let justEnded = false;
-
-  if (!endedReason) {
-    if (nextMeters.paciencia <= 0) {
-      endedReason = "expulso";
-      endedTitle = "Sessão Encerrada pela Mesa Diretora";
-      endedSummary =
-        "A paciência do Dr. Vavá zerou. A taquigrafia cortou seu áudio e a Polícia Legislativa acompanhou você gentilmente até o elevador.";
-      justEnded = true;
-    } else if (ledger.scenarioId === "emenda_pix" && nextMeters.verbaMilhoes >= 12) {
-      endedReason = "vitoria";
-      endedTitle = "Emenda PIX Carimbada no Diário Oficial!";
-      endedSummary = `Você arrancou R$ ${nextMeters.verbaMilhoes} milhões para Santa Rita do Asfalto — com apenas ${jabutisEngolidos} jabuti(s) do cunhado no rodapé.`;
-      justEnded = true;
-    } else if (ledger.scenarioId === "cpi_imprensa" && nextMeters.riscoCpi >= 90) {
-      endedReason = "vitoria";
-      endedTitle = "Manchete Nacional! CPI Aberta na Madrugada!";
-      endedSummary =
-        "Você encurralou o Presidente da Câmara até o Risco de CPI explodir. O áudio já está no Plantão da TV Câmara!";
-      justEnded = true;
-    } else if (
-      ledger.scenarioId === "salve_restinga" &&
-      nextMeters.apoioBase >= 80
-    ) {
-      endedReason = "vitoria";
-      endedTitle = "Restinga Salva no Grito e no Consenso!";
-      endedSummary =
-        "Por milagre regimental, você convenceu a Mesa Diretora a engavetar o paredão de 40 andares (por enquanto).";
-      justEnded = true;
-    } else if (
-      ledger.scenarioId === "caca_cargo" &&
-      documents.some((d) => d.action.type === "nomear_dou")
-    ) {
-      endedReason = "vitoria";
-      endedTitle = "Publicado no DOU — Sobrinho Empossado!";
-      endedSummary =
-        "Portaria assinada na caneta Montblanc! Seu indicado já tem crachá, sala no Anexo IV e café liberado.";
-      justEnded = true;
-    } else if (
-      ledger.scenarioId !== "cpi_imprensa" &&
-      nextMeters.riscoCpi >= 100
-    ) {
-      endedReason = "cpi_estourou";
-      endedTitle = "Plantão Extra: Polícia Federal na Ante-Sala!";
-      endedSummary =
-        "O escândalo vazou antes da assinatura final. Vavá trancou a gaveta dos ofícios e convocou coletiva dizendo que foi tudo 'trabalho territorial'.";
-      justEnded = true;
-    }
-  }
-
-  const nextLedger: SessionLedger = {
+  const candidateLedger: SessionLedger = {
     ...ledger,
     turnCount: nextTurn,
     act: nextAct,
@@ -509,16 +532,22 @@ export function applyDirectorPatch(
     jabutisEngolidos,
     micCutCount,
     bestQuote,
-    endedReason,
-    endedTitle,
-    endedSummary,
+  };
+
+  const outcome = evaluateScenarioOutcome(candidateLedger);
+
+  const nextLedger: SessionLedger = {
+    ...candidateLedger,
+    endedReason: outcome.endedReason,
+    endedTitle: outcome.endedTitle,
+    endedSummary: outcome.endedSummary,
   };
 
   return {
     nextLedger,
     firedAction: patch.action,
     newDocument,
-    justEnded,
+    justEnded: outcome.justEnded,
   };
 }
 

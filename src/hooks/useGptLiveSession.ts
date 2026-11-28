@@ -34,6 +34,8 @@ interface ConnectOptions {
 }
 
 const SESSION_DURATION_SEC = 300;
+const METER_INTERVAL_MS = 75;
+const METER_DEADBAND = 0.03;
 
 function formatNow(): string {
   return new Date().toLocaleTimeString("pt-BR", {
@@ -48,25 +50,29 @@ function makeId(prefix: string): string {
 
 async function waitForIceGathering(
   pc: RTCPeerConnection,
-  timeoutMs = 2500
+  timeoutMs = 2500,
+  signal?: AbortSignal
 ): Promise<void> {
-  if (pc.iceGatheringState === "complete") return;
+  if (pc.iceGatheringState === "complete" || signal?.aborted) return;
 
   await new Promise<void>((resolve) => {
-    const timer = window.setTimeout(() => {
+    const finish = () => {
+      window.clearTimeout(timer);
       pc.removeEventListener("icegatheringstatechange", onStateChange);
+      signal?.removeEventListener("abort", finish);
       resolve();
-    }, timeoutMs);
+    };
+
+    const timer = window.setTimeout(finish, timeoutMs);
 
     function onStateChange() {
       if (pc.iceGatheringState === "complete") {
-        window.clearTimeout(timer);
-        pc.removeEventListener("icegatheringstatechange", onStateChange);
-        resolve();
+        finish();
       }
     }
 
     pc.addEventListener("icegatheringstatechange", onStateChange);
+    signal?.addEventListener("abort", finish, { once: true });
   });
 }
 
@@ -99,13 +105,20 @@ export function useGptLiveSession(options: {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const rafRef = useRef<number | null>(null);
   const timerRef = useRef<number | null>(null);
+  const deadlineMsRef = useRef<number | null>(null);
   const forceMuteTimerRef = useRef<number | null>(null);
   const speakingHoldRef = useRef<number>(0);
   const userMutedPrefRef = useRef<boolean>(false);
   const openingCueRef = useRef<string>(LIVE_OPENING_CUE);
 
-  // Accumulated turn buffers (fixes fragmented-delta regex & duplicate input transcripts)
+  // Concurrency guards for connect/disconnect races
+  const connectAttemptRef = useRef<number>(0);
+  const connectAbortRef = useRef<AbortController | null>(null);
+
+  // Accumulated turn buffers (fixes fragmented-delta regex & duplicate/stale user utterances)
   const lastUserUtteranceRef = useRef<string>("");
+  const activeUserItemKeyRef = useRef<string | null>(null);
+  const userUtteranceSeqRef = useRef<number>(0);
   const currentAssistantUtteranceRef = useRef<string>("");
   const inputDeltaItemIdsRef = useRef<Set<string>>(new Set());
   const turnFlushTimerRef = useRef<number | null>(null);
@@ -122,10 +135,19 @@ export function useGptLiveSession(options: {
     if (assistantText.length < 8) return;
     const userText = lastUserUtteranceRef.current.trim();
     currentAssistantUtteranceRef.current = "";
+    lastUserUtteranceRef.current = "";
+    activeUserItemKeyRef.current = null;
     callbacksRef.current.onLiveTurnComplete?.(userText, assistantText);
   }, []);
 
   const cleanup = useCallback(() => {
+    connectAttemptRef.current += 1;
+    if (connectAbortRef.current) {
+      connectAbortRef.current.abort();
+      connectAbortRef.current = null;
+    }
+    deadlineMsRef.current = null;
+
     if (rafRef.current !== null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
@@ -144,6 +166,7 @@ export function useGptLiveSession(options: {
     }
     if (dcRef.current) {
       try {
+        dcRef.current.onmessage = null;
         dcRef.current.close();
       } catch {
         // ignore
@@ -152,6 +175,8 @@ export function useGptLiveSession(options: {
     }
     if (pcRef.current) {
       try {
+        pcRef.current.onconnectionstatechange = null;
+        pcRef.current.ontrack = null;
         pcRef.current.close();
       } catch {
         // ignore
@@ -175,6 +200,7 @@ export function useGptLiveSession(options: {
     }
     userMutedPrefRef.current = false;
     lastUserUtteranceRef.current = "";
+    activeUserItemKeyRef.current = null;
     currentAssistantUtteranceRef.current = "";
     inputDeltaItemIdsRef.current.clear();
     setIsMuted(false);
@@ -217,9 +243,46 @@ export function useGptLiveSession(options: {
       accessCode,
     }: ConnectOptions = {}) => {
       cleanup();
+      const attemptId = connectAttemptRef.current;
+      const abortController = new AbortController();
+      connectAbortRef.current = abortController;
+
       setError(null);
       setStatus("connecting");
       openingCueRef.current = openingCue;
+
+      let localAudioCtx: AudioContext | null = null;
+      let localStream: MediaStream | null = null;
+      let localPc: RTCPeerConnection | null = null;
+
+      const isStale = () =>
+        attemptId !== connectAttemptRef.current || abortController.signal.aborted;
+
+      const teardownAttemptLocals = () => {
+        if (localPc) {
+          try {
+            localPc.onconnectionstatechange = null;
+            localPc.ontrack = null;
+            localPc.close();
+          } catch {
+            // ignore
+          }
+          if (pcRef.current === localPc) pcRef.current = null;
+          localPc = null;
+        }
+        if (localStream) {
+          for (const track of localStream.getTracks()) {
+            track.stop();
+          }
+          if (localStreamRef.current === localStream) localStreamRef.current = null;
+          localStream = null;
+        }
+        if (localAudioCtx) {
+          localAudioCtx.close().catch(() => {});
+          if (audioCtxRef.current === localAudioCtx) audioCtxRef.current = null;
+          localAudioCtx = null;
+        }
+      };
 
       try {
         const AudioCtx =
@@ -227,19 +290,29 @@ export function useGptLiveSession(options: {
           (window as unknown as { webkitAudioContext: typeof AudioContext })
             .webkitAudioContext;
         const audioCtx = new AudioCtx();
+        localAudioCtx = audioCtx;
         await audioCtx.resume().catch(() => {});
+        if (isStale()) {
+          teardownAttemptLocals();
+          return;
+        }
         audioCtxRef.current = audioCtx;
 
-        const localStream = await navigator.mediaDevices.getUserMedia({
+        const mediaStream = await navigator.mediaDevices.getUserMedia({
           audio: {
             echoCancellation: true,
             noiseSuppression: true,
             autoGainControl: true,
           },
         });
-        localStreamRef.current = localStream;
+        localStream = mediaStream;
+        if (isStale()) {
+          teardownAttemptLocals();
+          return;
+        }
+        localStreamRef.current = mediaStream;
 
-        const inSource = audioCtx.createMediaStreamSource(localStream);
+        const inSource = audioCtx.createMediaStreamSource(mediaStream);
         const inAnalyser = audioCtx.createAnalyser();
         inAnalyser.fftSize = 256;
         inSource.connect(inAnalyser);
@@ -247,10 +320,11 @@ export function useGptLiveSession(options: {
         let outAnalyser: AnalyserNode | null = null;
 
         const pc = new RTCPeerConnection();
+        localPc = pc;
         pcRef.current = pc;
 
-        for (const track of localStream.getTracks()) {
-          pc.addTrack(track, localStream);
+        for (const track of mediaStream.getTracks()) {
+          pc.addTrack(track, mediaStream);
         }
 
         const audioEl = document.createElement("audio");
@@ -259,6 +333,7 @@ export function useGptLiveSession(options: {
         audioElRef.current = audioEl;
 
         pc.ontrack = (event) => {
+          if (pcRef.current !== pc) return;
           const remoteStream = event.streams[0];
           if (!remoteStream) return;
           audioEl.srcObject = remoteStream;
@@ -275,10 +350,12 @@ export function useGptLiveSession(options: {
         };
 
         pc.onconnectionstatechange = () => {
+          if (pcRef.current !== pc) return;
           if (
             pc.connectionState === "failed" ||
             pc.connectionState === "closed"
           ) {
+            cleanup();
             setStatus("idle");
             setIsStandby(false);
           }
@@ -287,46 +364,75 @@ export function useGptLiveSession(options: {
         const inBuf = new Uint8Array(inAnalyser.frequencyBinCount);
         const outTimeBuf = new Uint8Array(128);
         const outFreqBuf = new Uint8Array(128);
+        let lastMeterUpdateAt = 0;
+        let lastReportedIn = 0;
+        let lastReportedOut = 0;
+        let lastReportedSpeaking = false;
 
         const meterLoop = () => {
-          if (!pcRef.current) return;
+          if (pcRef.current !== pc) return;
 
-          inAnalyser.getByteTimeDomainData(inBuf);
-          let inSum = 0;
-          for (let i = 0; i < inBuf.length; i++) {
-            const v = (inBuf[i] - 128) / 128;
-            inSum += v * v;
-          }
-          setInputLevel(Math.min(1, Math.sqrt(inSum / inBuf.length) * 3.8));
+          const now = performance.now();
+          if (now - lastMeterUpdateAt >= METER_INTERVAL_MS) {
+            lastMeterUpdateAt = now;
 
-          if (outAnalyser) {
-            outAnalyser.getByteTimeDomainData(outTimeBuf);
-            outAnalyser.getByteFrequencyData(outFreqBuf);
-
-            let outSum = 0;
-            for (let i = 0; i < outTimeBuf.length; i++) {
-              const v = (outTimeBuf[i] - 128) / 128;
-              outSum += v * v;
+            inAnalyser.getByteTimeDomainData(inBuf);
+            let inSum = 0;
+            for (let i = 0; i < inBuf.length; i++) {
+              const v = (inBuf[i] - 128) / 128;
+              inSum += v * v;
             }
-            const rms = Math.sqrt(outSum / outTimeBuf.length) * 4.2;
-
-            // Voice-band emphasis (~300Hz-3kHz) for expressive stage animation
-            let voiceBandSum = 0;
-            const startBin = 2;
-            const endBin = Math.min(26, outFreqBuf.length);
-            for (let i = startBin; i < endBin; i++) {
-              voiceBandSum += outFreqBuf[i] / 255;
+            const nextIn = Math.min(1, Math.sqrt(inSum / inBuf.length) * 3.8);
+            const snappedIn = nextIn < 0.02 ? 0 : nextIn;
+            if (
+              Math.abs(snappedIn - lastReportedIn) >= METER_DEADBAND ||
+              (snappedIn === 0 && lastReportedIn !== 0)
+            ) {
+              lastReportedIn = snappedIn;
+              setInputLevel(snappedIn);
             }
-            const voiceBand = voiceBandSum / Math.max(1, endBin - startBin);
-            const blended = Math.min(1, rms * 0.65 + voiceBand * 0.55);
-            setOutputLevel(blended);
 
-            const now = performance.now();
-            if (blended > 0.055) {
-              speakingHoldRef.current = now + 280;
-              setIsSpeaking(true);
-            } else if (now > speakingHoldRef.current) {
-              setIsSpeaking(false);
+            if (outAnalyser) {
+              outAnalyser.getByteTimeDomainData(outTimeBuf);
+              outAnalyser.getByteFrequencyData(outFreqBuf);
+
+              let outSum = 0;
+              for (let i = 0; i < outTimeBuf.length; i++) {
+                const v = (outTimeBuf[i] - 128) / 128;
+                outSum += v * v;
+              }
+              const rms = Math.sqrt(outSum / outTimeBuf.length) * 4.2;
+
+              // Voice-band emphasis (~300Hz-3kHz) for expressive stage animation
+              let voiceBandSum = 0;
+              const startBin = 2;
+              const endBin = Math.min(26, outFreqBuf.length);
+              for (let i = startBin; i < endBin; i++) {
+                voiceBandSum += outFreqBuf[i] / 255;
+              }
+              const voiceBand = voiceBandSum / Math.max(1, endBin - startBin);
+              const blended = Math.min(1, rms * 0.65 + voiceBand * 0.55);
+              const snappedOut = blended < 0.02 ? 0 : blended;
+
+              if (
+                Math.abs(snappedOut - lastReportedOut) >= METER_DEADBAND ||
+                (snappedOut === 0 && lastReportedOut !== 0)
+              ) {
+                lastReportedOut = snappedOut;
+                setOutputLevel(snappedOut);
+              }
+
+              let nextSpeaking = lastReportedSpeaking;
+              if (blended > 0.055) {
+                speakingHoldRef.current = now + 280;
+                nextSpeaking = true;
+              } else if (now > speakingHoldRef.current) {
+                nextSpeaking = false;
+              }
+              if (nextSpeaking !== lastReportedSpeaking) {
+                lastReportedSpeaking = nextSpeaking;
+                setIsSpeaking(nextSpeaking);
+              }
             }
           }
 
@@ -338,12 +444,13 @@ export function useGptLiveSession(options: {
         dcRef.current = dc;
 
         dc.onmessage = (event) => {
+          if (dcRef.current !== dc) return;
           try {
             const msg = JSON.parse(event.data) as Record<string, unknown>;
             const type = String(msg.type ?? "");
-            const itemKey = String(
-              msg.item_id ?? msg.response_id ?? msg.utterance_id ?? ""
-            ) || undefined;
+            const itemKey =
+              String(msg.item_id ?? msg.response_id ?? msg.utterance_id ?? "") ||
+              undefined;
 
             if (type === "session.started") {
               setStatus("live");
@@ -432,7 +539,7 @@ export function useGptLiveSession(options: {
               return;
             }
 
-            // User speech transcript deltas (deduplicated against .completed!)
+            // User speech transcript deltas (unique per-utterance keys, deduplicated against .completed!)
             if (
               type === "session.input_transcript.delta" ||
               type === "conversation.item.input_audio_transcription.delta"
@@ -440,7 +547,14 @@ export function useGptLiveSession(options: {
               const delta = String(msg.delta ?? "");
               if (delta) {
                 setIsStandby(false);
-                const key = itemKey ? `usr-${itemKey}` : "usr-active";
+                const key = itemKey
+                  ? `usr-${itemKey}`
+                  : activeUserItemKeyRef.current ||
+                    (activeUserItemKeyRef.current = `usr-live-${++userUtteranceSeqRef.current}`);
+                if (activeUserItemKeyRef.current !== key) {
+                  activeUserItemKeyRef.current = key;
+                  lastUserUtteranceRef.current = "";
+                }
                 inputDeltaItemIdsRef.current.add(key);
                 lastUserUtteranceRef.current += delta;
                 callbacksRef.current.onTranscriptDelta("user", delta, key, false);
@@ -453,10 +567,12 @@ export function useGptLiveSession(options: {
               type === "conversation.item.input_audio_transcription.completed"
             ) {
               const transcript = String(msg.transcript ?? "").trim();
-              const key = itemKey ? `usr-${itemKey}` : "usr-active";
+              const key = itemKey
+                ? `usr-${itemKey}`
+                : activeUserItemKeyRef.current ||
+                  `usr-live-${++userUtteranceSeqRef.current}`;
               if (transcript) {
                 lastUserUtteranceRef.current = transcript;
-                // Replace cleanly if deltas arrived for this item, otherwise append once
                 const hadDeltas = inputDeltaItemIdsRef.current.has(key);
                 inputDeltaItemIdsRef.current.delete(key);
                 callbacksRef.current.onTranscriptDelta(
@@ -466,13 +582,17 @@ export function useGptLiveSession(options: {
                   hadDeltas
                 );
               }
+              if (activeUserItemKeyRef.current === key) {
+                activeUserItemKeyRef.current = null;
+              }
               return;
             }
 
             if (type === "error" || type === "session.error") {
-              const errObj = msg.error as { message?: string } | undefined;
-              const detail = errObj?.message || JSON.stringify(msg).slice(0, 220);
-              setError(`Erro na chamada de voz: ${detail}`);
+              console.error("[live] data channel error:", msg);
+              setError(
+                "Oscilação na chamada de voz. Se o áudio falhar, encerre e abra nova linha."
+              );
             }
           } catch {
             // ignore non-JSON frames
@@ -480,8 +600,22 @@ export function useGptLiveSession(options: {
         };
 
         const offer = await pc.createOffer();
+        if (isStale()) {
+          teardownAttemptLocals();
+          return;
+        }
+
         await pc.setLocalDescription(offer);
-        await waitForIceGathering(pc);
+        if (isStale()) {
+          teardownAttemptLocals();
+          return;
+        }
+
+        await waitForIceGathering(pc, 2500, abortController.signal);
+        if (isStale()) {
+          teardownAttemptLocals();
+          return;
+        }
 
         const localSdp = pc.localDescription?.sdp || offer.sdp;
         if (!localSdp) {
@@ -498,13 +632,21 @@ export function useGptLiveSession(options: {
             ledger,
             accessCode,
           }),
+          signal: abortController.signal,
         });
+        if (isStale()) {
+          teardownAttemptLocals();
+          return;
+        }
 
         const data = (await res.json().catch(() => ({}))) as {
           error?: string;
-          detail?: string;
           transport?: { sdp?: string };
         };
+        if (isStale()) {
+          teardownAttemptLocals();
+          return;
+        }
 
         if (res.status === 401) {
           cleanup();
@@ -516,9 +658,8 @@ export function useGptLiveSession(options: {
 
         if (!res.ok || !data.transport?.sdp) {
           throw new Error(
-            data.error
-              ? `${data.error}${data.detail ? ` (${data.detail})` : ""}`
-              : `Falha HTTP ${res.status} ao conectar voz.`
+            data.error ||
+              "Não foi possível conectar a chamada de voz com o gabinete agora."
           );
         }
 
@@ -526,22 +667,33 @@ export function useGptLiveSession(options: {
           type: "answer",
           sdp: data.transport.sdp,
         });
+        if (isStale()) {
+          teardownAttemptLocals();
+          return;
+        }
 
         setStatus("live");
+        deadlineMsRef.current = Date.now() + SESSION_DURATION_SEC * 1000;
         setRemainingSeconds(SESSION_DURATION_SEC);
 
         timerRef.current = window.setInterval(() => {
-          setRemainingSeconds((prev) => {
-            if (prev <= 1) {
-              disconnect(
-                "Sessão de voz pausada após 5 minutos. Clique em 'Falar com o Vavá' para retomar."
-              );
-              return 0;
-            }
-            return prev - 1;
-          });
+          if (deadlineMsRef.current === null) return;
+          const left = Math.max(
+            0,
+            Math.ceil((deadlineMsRef.current - Date.now()) / 1000)
+          );
+          setRemainingSeconds(left);
+          if (left <= 0) {
+            disconnect(
+              "Sessão de voz pausada após 5 minutos. Clique em 'Falar com o Vavá' para retomar."
+            );
+          }
         }, 1000);
       } catch (err) {
+        if (isStale()) {
+          teardownAttemptLocals();
+          return;
+        }
         cleanup();
         const message =
           err instanceof DOMException && err.name === "NotAllowedError"
@@ -560,14 +712,12 @@ export function useGptLiveSession(options: {
     if (isForceMuted) return;
     const stream = localStreamRef.current;
     if (!stream) return;
-    setIsMuted((prev) => {
-      const next = !prev;
-      userMutedPrefRef.current = next;
-      for (const track of stream.getAudioTracks()) {
-        track.enabled = !next;
-      }
-      return next;
-    });
+    const next = !userMutedPrefRef.current;
+    userMutedPrefRef.current = next;
+    for (const track of stream.getAudioTracks()) {
+      track.enabled = !next;
+    }
+    setIsMuted(next);
   }, [isForceMuted]);
 
   /** Corta fisicamente o microfone do visitante quando Vavá aciona a Taquigrafia! */
@@ -599,20 +749,33 @@ export function useGptLiveSession(options: {
   }, []);
 
   const extendSession = useCallback(() => {
-    setRemainingSeconds((prev) => Math.min(600, prev + 180));
+    if (deadlineMsRef.current === null) return;
+    const now = Date.now();
+    const maxDeadline = now + 600 * 1000;
+    deadlineMsRef.current = Math.min(
+      maxDeadline,
+      Math.max(now, deadlineMsRef.current) + 180 * 1000
+    );
+    setRemainingSeconds(
+      Math.max(0, Math.ceil((deadlineMsRef.current - now) / 1000))
+    );
   }, []);
 
   /** Envia texto digitado/Carta na Manga para o Vavá responder ao vivo (schema válido com delegation_id: null) */
   const sendLiveTextMessage = useCallback(
     (text: string): boolean => {
-      lastUserUtteranceRef.current = text;
-      setIsStandby(false);
-      return sendDataEvent({
+      const ok = sendDataEvent({
         type: "session.commentary.append",
         event_id: makeId("txt-comm"),
         delegation_id: null,
         content: `O visitante acabou de dizer na sua frente: "${text}". Responda agora em voz alta (1 a 2 frases curtas, ~180 caracteres), 100% no personagem Vavá sem filtro.`,
       });
+      if (ok) {
+        lastUserUtteranceRef.current = text;
+        activeUserItemKeyRef.current = null;
+        setIsStandby(false);
+      }
+      return ok;
     },
     [sendDataEvent]
   );

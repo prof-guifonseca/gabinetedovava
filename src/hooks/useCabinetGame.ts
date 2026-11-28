@@ -3,6 +3,8 @@ import {
   applyDirectorPatch,
   classifyVisitorArchetype,
   clamp,
+  computeDramaticAct,
+  evaluateScenarioOutcome,
   sanitizeDirectorPatch,
   type AvatarMood,
   type BackstageInterrupt,
@@ -27,13 +29,31 @@ export interface SavedAchievement {
 }
 
 const ACHIEVEMENTS_KEY = "gabinete_vava_achievements_v2";
+const VALID_SCENARIO_IDS = new Set<string>(Object.keys(SCENARIOS));
 
 function loadAchievements(): SavedAchievement[] {
   try {
     const raw = window.localStorage.getItem(ACHIEVEMENTS_KEY);
     if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.slice(0, 20) : [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item): item is SavedAchievement => {
+        if (typeof item !== "object" || item === null) return false;
+        const rec = item as Record<string, unknown>;
+        return (
+          typeof rec.id === "string" &&
+          rec.id.trim().length > 0 &&
+          typeof rec.title === "string" &&
+          rec.title.trim().length > 0 &&
+          typeof rec.stamp === "string" &&
+          rec.stamp.trim().length > 0 &&
+          typeof rec.scenarioId === "string" &&
+          VALID_SCENARIO_IDS.has(rec.scenarioId) &&
+          typeof rec.achievedAt === "string"
+        );
+      })
+      .slice(0, 20);
   } catch {
     return [];
   }
@@ -75,10 +95,49 @@ export function useCabinetGame() {
   const ledgerRef = useRef(ledger);
   ledgerRef.current = ledger;
 
+  const sessionEpochRef = useRef<number>(0);
+  const directorAbortRef = useRef<AbortController | null>(null);
+
   const moodDecayRef = useRef<number | null>(null);
   const deltaClearRef = useRef<number | null>(null);
+  const gavelShakeRef = useRef<number | null>(null);
+  const interruptDelayRef = useRef<number | null>(null);
   const interruptClearRef = useRef<number | null>(null);
+  const summaryDelayRef = useRef<number | null>(null);
   const micCutIntervalRef = useRef<number | null>(null);
+  const micCutDeadlineRef = useRef<number | null>(null);
+
+  const clearAllTimers = useCallback(() => {
+    if (moodDecayRef.current !== null) {
+      window.clearTimeout(moodDecayRef.current);
+      moodDecayRef.current = null;
+    }
+    if (deltaClearRef.current !== null) {
+      window.clearTimeout(deltaClearRef.current);
+      deltaClearRef.current = null;
+    }
+    if (gavelShakeRef.current !== null) {
+      window.clearTimeout(gavelShakeRef.current);
+      gavelShakeRef.current = null;
+    }
+    if (interruptDelayRef.current !== null) {
+      window.clearTimeout(interruptDelayRef.current);
+      interruptDelayRef.current = null;
+    }
+    if (interruptClearRef.current !== null) {
+      window.clearTimeout(interruptClearRef.current);
+      interruptClearRef.current = null;
+    }
+    if (summaryDelayRef.current !== null) {
+      window.clearTimeout(summaryDelayRef.current);
+      summaryDelayRef.current = null;
+    }
+    if (micCutIntervalRef.current !== null) {
+      window.clearInterval(micCutIntervalRef.current);
+      micCutIntervalRef.current = null;
+    }
+    micCutDeadlineRef.current = null;
+  }, []);
 
   const scheduleMoodDecay = useCallback((nextMood: AvatarMood) => {
     if (moodDecayRef.current !== null) {
@@ -86,7 +145,10 @@ export function useCabinetGame() {
       moodDecayRef.current = null;
     }
     if (nextMood === "neutro") return;
+    const epoch = sessionEpochRef.current;
     moodDecayRef.current = window.setTimeout(() => {
+      moodDecayRef.current = null;
+      if (epoch !== sessionEpochRef.current) return;
       setMood((curr) => (curr === nextMood ? "neutro" : curr));
     }, 9500);
   }, []);
@@ -102,57 +164,101 @@ export function useCabinetGame() {
   const triggerGavelShake = useCallback(() => {
     setIsGavelShaking(true);
     cabinetSfx.playGavelStrike();
-    window.setTimeout(() => setIsGavelShaking(false), 680);
+    if (gavelShakeRef.current !== null) {
+      window.clearTimeout(gavelShakeRef.current);
+    }
+    const epoch = sessionEpochRef.current;
+    gavelShakeRef.current = window.setTimeout(() => {
+      gavelShakeRef.current = null;
+      if (epoch !== sessionEpochRef.current) return;
+      setIsGavelShaking(false);
+    }, 680);
   }, []);
 
   const triggerMicCut = useCallback((seconds: number) => {
     cabinetSfx.playMicCut();
-    setMicCutSecondsLeft(seconds);
+    const safeSeconds = Math.max(1, Math.round(seconds));
+    micCutDeadlineRef.current = Date.now() + safeSeconds * 1000;
+    setMicCutSecondsLeft(safeSeconds);
+
     if (micCutIntervalRef.current !== null) {
       window.clearInterval(micCutIntervalRef.current);
     }
     micCutIntervalRef.current = window.setInterval(() => {
-      setMicCutSecondsLeft((prev) => {
-        if (prev <= 1) {
-          if (micCutIntervalRef.current !== null) {
-            window.clearInterval(micCutIntervalRef.current);
-            micCutIntervalRef.current = null;
-          }
-          return 0;
+      if (micCutDeadlineRef.current === null) return;
+      const left = Math.max(
+        0,
+        Math.ceil((micCutDeadlineRef.current - Date.now()) / 1000)
+      );
+      setMicCutSecondsLeft(left);
+      if (left <= 0) {
+        if (micCutIntervalRef.current !== null) {
+          window.clearInterval(micCutIntervalRef.current);
+          micCutIntervalRef.current = null;
         }
-        return prev - 1;
-      });
-    }, 1000);
+        micCutDeadlineRef.current = null;
+      }
+    }, 500);
   }, []);
 
   const toggleSfxMute = useCallback(() => {
-    setSfxMuted((prev) => {
-      const next = !prev;
-      cabinetSfx.setMuted(next);
-      return next;
-    });
+    const next = !cabinetSfx.isMuted();
+    cabinetSfx.setMuted(next);
+    setSfxMuted(next);
   }, []);
 
-  const resetForScenario = useCallback((scenarioId: ScenarioId) => {
-    if (moodDecayRef.current !== null) window.clearTimeout(moodDecayRef.current);
-    if (deltaClearRef.current !== null) window.clearTimeout(deltaClearRef.current);
-    if (interruptClearRef.current !== null)
-      window.clearTimeout(interruptClearRef.current);
-    if (micCutIntervalRef.current !== null)
-      window.clearInterval(micCutIntervalRef.current);
+  const finalizeEndedSession = useCallback(
+    (endedLedger: SessionLedger, nowLabel: string, epoch: number) => {
+      const arch = classifyVisitorArchetype(endedLedger);
+      setAchievements(
+        saveAchievement({
+          id: arch.id,
+          title: arch.title,
+          stamp: arch.stamp,
+          scenarioId: endedLedger.scenarioId,
+          achievedAt: nowLabel,
+        })
+      );
+      if (endedLedger.endedReason === "expulso") {
+        triggerGavelShake();
+      } else {
+        cabinetSfx.playTickerAlert();
+      }
+      if (summaryDelayRef.current !== null) {
+        window.clearTimeout(summaryDelayRef.current);
+      }
+      summaryDelayRef.current = window.setTimeout(() => {
+        summaryDelayRef.current = null;
+        if (epoch !== sessionEpochRef.current) return;
+        setShowSummary(true);
+      }, 1200);
+    },
+    [triggerGavelShake]
+  );
 
-    const fresh = createInitialLedger(scenarioId);
-    ledgerRef.current = fresh;
-    setLedger(fresh);
-    setMood("neutro");
-    setLastDeltas(null);
-    setActiveDocument(null);
-    setIsGavelShaking(false);
-    setMicCutSecondsLeft(0);
-    setActiveInterrupt(null);
-    setShowSummary(false);
-    return SCENARIOS[scenarioId];
-  }, []);
+  const resetForScenario = useCallback(
+    (scenarioId: ScenarioId) => {
+      sessionEpochRef.current += 1;
+      if (directorAbortRef.current) {
+        directorAbortRef.current.abort();
+        directorAbortRef.current = null;
+      }
+      clearAllTimers();
+
+      const fresh = createInitialLedger(scenarioId);
+      ledgerRef.current = fresh;
+      setLedger(fresh);
+      setMood("neutro");
+      setLastDeltas(null);
+      setActiveDocument(null);
+      setIsGavelShaking(false);
+      setMicCutSecondsLeft(0);
+      setActiveInterrupt(null);
+      setShowSummary(false);
+      return SCENARIOS[scenarioId];
+    },
+    [clearAllTimers]
+  );
 
   const evaluateTurnWithDirector = useCallback(
     async (params: {
@@ -165,7 +271,14 @@ export function useCabinetGame() {
       onLiveInject?: (instruction: string, commentary?: string) => void;
       onForceMicCut?: (seconds: number) => void;
     }) => {
+      const epoch = sessionEpochRef.current;
       const currentLedger = ledgerRef.current;
+
+      if (directorAbortRef.current) {
+        directorAbortRef.current.abort();
+      }
+      const controller = new AbortController();
+      directorAbortRef.current = controller;
 
       try {
         const res = await fetch("/api/director", {
@@ -177,12 +290,20 @@ export function useCabinetGame() {
             ledger: currentLedger,
             accessCode: params.accessCode,
           }),
+          signal: controller.signal,
         });
 
+        if (epoch !== sessionEpochRef.current || controller.signal.aborted) {
+          return null;
+        }
         if (!res.ok) return null;
+
         const data = (await res.json().catch(() => ({}))) as {
           patch?: unknown;
         };
+        if (epoch !== sessionEpochRef.current || controller.signal.aborted) {
+          return null;
+        }
         if (!data.patch) return null;
 
         const patch = sanitizeDirectorPatch(data.patch);
@@ -206,11 +327,13 @@ export function useCabinetGame() {
             window.clearTimeout(deltaClearRef.current);
           }
           deltaClearRef.current = window.setTimeout(() => {
+            deltaClearRef.current = null;
+            if (epoch !== sessionEpochRef.current) return;
             setLastDeltas(null);
           }, 3400);
         }
 
-        // Execute tactile Cabinet Actions (Documents appear as inline clickable cards — never hijacking the screen!)
+        // Execute tactile Cabinet Actions (Documents appear as inline clickable cards)
         if (firedAction.type === "bater_martelo") {
           triggerGavelShake();
           params.onSystemEvent(`🔨 Mesa Diretora: ${firedAction.motivo}`);
@@ -229,45 +352,97 @@ export function useCabinetGame() {
           cabinetSfx.playDossierSlide();
         }
 
-        // Check if an organic Brasília Backstage Interrupt should fire!
-        let finalLedger = nextLedger;
-        if (!justEnded) {
+        ledgerRef.current = nextLedger;
+        setLedger(nextLedger);
+
+        if (justEnded) {
+          finalizeEndedSession(nextLedger, params.nowLabel, epoch);
+        } else {
+          // Check if an organic Brasília Backstage Interrupt should fire and apply it in lockstep at 900ms!
           const interrupt = pickBackstageInterrupt(nextLedger);
           if (interrupt) {
-            const delta = interrupt.meterDelta ?? {};
-            finalLedger = {
-              ...nextLedger,
-              triggeredInterruptIds: [
-                ...nextLedger.triggeredInterruptIds,
-                interrupt.id,
-              ],
-              headlineTicker: interrupt.headline,
-              meters: {
+            if (interruptDelayRef.current !== null) {
+              window.clearTimeout(interruptDelayRef.current);
+            }
+            interruptDelayRef.current = window.setTimeout(() => {
+              interruptDelayRef.current = null;
+              if (epoch !== sessionEpochRef.current) return;
+
+              const latest = ledgerRef.current;
+              if (
+                latest.endedReason ||
+                latest.triggeredInterruptIds.includes(interrupt.id)
+              ) {
+                return;
+              }
+
+              const delta = interrupt.meterDelta ?? {};
+              const updatedMeters: CabinetMeters = {
                 apoioBase: clamp(
-                  nextLedger.meters.apoioBase + (delta.apoioBase ?? 0),
+                  latest.meters.apoioBase + (delta.apoioBase ?? 0),
                   0,
                   100
                 ),
                 riscoCpi: clamp(
-                  nextLedger.meters.riscoCpi + (delta.riscoCpi ?? 0),
+                  latest.meters.riscoCpi + (delta.riscoCpi ?? 0),
                   0,
                   100
                 ),
                 verbaMilhoes: clamp(
-                  nextLedger.meters.verbaMilhoes + (delta.verbaMilhoes ?? 0),
+                  latest.meters.verbaMilhoes + (delta.verbaMilhoes ?? 0),
                   0,
                   50
                 ),
                 paciencia: clamp(
-                  nextLedger.meters.paciencia + (delta.paciencia ?? 0),
+                  latest.meters.paciencia + (delta.paciencia ?? 0),
                   0,
                   100
                 ),
-              },
-            };
+              };
 
-            // Trigger backstage audio + visual banner slightly after the reply lands
-            window.setTimeout(() => {
+              const updatedAct = computeDramaticAct(
+                latest.turnCount,
+                updatedMeters
+              );
+
+              const candidateLedger: SessionLedger = {
+                ...latest,
+                act: updatedAct,
+                triggeredInterruptIds: [
+                  ...latest.triggeredInterruptIds,
+                  interrupt.id,
+                ],
+                headlineTicker: interrupt.headline,
+                meters: updatedMeters,
+              };
+
+              const outcome = evaluateScenarioOutcome(candidateLedger);
+              const updatedLedger: SessionLedger = {
+                ...candidateLedger,
+                endedReason: outcome.endedReason,
+                endedTitle: outcome.endedTitle,
+                endedSummary: outcome.endedSummary,
+              };
+
+              ledgerRef.current = updatedLedger;
+              setLedger(updatedLedger);
+
+              if (
+                Object.values(delta).some(
+                  (v) => typeof v === "number" && v !== 0
+                )
+              ) {
+                setLastDeltas(delta);
+                if (deltaClearRef.current !== null) {
+                  window.clearTimeout(deltaClearRef.current);
+                }
+                deltaClearRef.current = window.setTimeout(() => {
+                  deltaClearRef.current = null;
+                  if (epoch !== sessionEpochRef.current) return;
+                  setLastDeltas(null);
+                }, 3400);
+              }
+
               if (interrupt.source === "dona_neide") {
                 if (interrupt.mood === "telefone") {
                   cabinetSfx.playOfficePhone();
@@ -277,6 +452,7 @@ export function useCabinetGame() {
               } else {
                 cabinetSfx.playTickerAlert();
               }
+
               setTransientMood(interrupt.mood);
               setActiveInterrupt(interrupt);
               params.onSystemEvent(interrupt.chatSystemNote);
@@ -286,44 +462,33 @@ export function useCabinetGame() {
                   interrupt.liveCommentary
                 );
               }
+
               if (interruptClearRef.current !== null) {
                 window.clearTimeout(interruptClearRef.current);
               }
               interruptClearRef.current = window.setTimeout(() => {
+                interruptClearRef.current = null;
+                if (epoch !== sessionEpochRef.current) return;
                 setActiveInterrupt(null);
               }, 9000);
+
+              if (outcome.justEnded) {
+                finalizeEndedSession(updatedLedger, params.nowLabel, epoch);
+              }
             }, 900);
           }
         }
 
-        ledgerRef.current = finalLedger;
-        setLedger(finalLedger);
-
-        if (justEnded) {
-          const arch = classifyVisitorArchetype(finalLedger);
-          setAchievements(
-            saveAchievement({
-              id: arch.id,
-              title: arch.title,
-              stamp: arch.stamp,
-              scenarioId: finalLedger.scenarioId,
-              achievedAt: params.nowLabel,
-            })
-          );
-          if (finalLedger.endedReason === "expulso") {
-            triggerGavelShake();
-          } else {
-            cabinetSfx.playTickerAlert();
-          }
-          window.setTimeout(() => setShowSummary(true), 1200);
-        }
-
-        return { patch, ledger: finalLedger, newDocument };
+        return { patch, ledger: nextLedger, newDocument };
       } catch {
         return null;
+      } finally {
+        if (directorAbortRef.current === controller) {
+          directorAbortRef.current = null;
+        }
       }
     },
-    [setTransientMood, triggerGavelShake, triggerMicCut]
+    [finalizeEndedSession, setTransientMood, triggerGavelShake, triggerMicCut]
   );
 
   const openManualSummary = useCallback(() => {
@@ -343,14 +508,14 @@ export function useCabinetGame() {
 
   useEffect(() => {
     return () => {
-      if (moodDecayRef.current !== null) window.clearTimeout(moodDecayRef.current);
-      if (deltaClearRef.current !== null) window.clearTimeout(deltaClearRef.current);
-      if (interruptClearRef.current !== null)
-        window.clearTimeout(interruptClearRef.current);
-      if (micCutIntervalRef.current !== null)
-        window.clearInterval(micCutIntervalRef.current);
+      sessionEpochRef.current += 1;
+      if (directorAbortRef.current) {
+        directorAbortRef.current.abort();
+        directorAbortRef.current = null;
+      }
+      clearAllTimers();
     };
-  }, []);
+  }, [clearAllTimers]);
 
   return {
     ledger,
