@@ -822,9 +822,9 @@ input {
   position: relative;
   display: flex;
   flex-direction: column;
-  min-height: 460px;
-  height: calc(100dvh - 178px);
-  max-height: 690px;
+  min-height: 440px;
+  height: calc(100dvh - 196px);
+  max-height: 675px;
 }
 
 .chat-toast {

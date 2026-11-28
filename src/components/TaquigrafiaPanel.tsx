@@ -67,15 +67,37 @@ export function TaquigrafiaPanel({
 
   const isInputBlocked = isSendingText || micCutSecondsLeft > 0;
 
-  // Bulletproof scroll-to-bottom on every entry delta, new document card, or typing indicator
+  // Bulletproof scroll-to-bottom on every entry delta, new document card, typing indicator, or viewport/keyboard resize
   useEffect(() => {
     const feed = feedRef.current;
     if (!feed) return;
-    const raf = requestAnimationFrame(() => {
+    const scrollToBottom = () => {
       feed.scrollTop = feed.scrollHeight;
+    };
+    const raf1 = requestAnimationFrame(() => {
+      scrollToBottom();
+      requestAnimationFrame(scrollToBottom);
     });
-    return () => cancelAnimationFrame(raf);
+    const timer = window.setTimeout(scrollToBottom, 80);
+    return () => {
+      cancelAnimationFrame(raf1);
+      window.clearTimeout(timer);
+    };
   }, [entries, isSendingText]);
+
+  useEffect(() => {
+    const feed = feedRef.current;
+    if (!feed || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      const distanceFromBottom =
+        feed.scrollHeight - feed.scrollTop - feed.clientHeight;
+      if (distanceFromBottom < 140) {
+        feed.scrollTop = feed.scrollHeight;
+      }
+    });
+    ro.observe(feed);
+    return () => ro.disconnect();
+  }, []);
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
